@@ -12,3 +12,9 @@ CONFIG_ETH_USE_ESP32_EMAC=y
 CONFIG_LWIP_MAX_SOCKETS=16
 CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384
 CONFIG_LWIP_TCP_WND_DEFAULT=16384
+
+# Firmware updates: roll back to the previous image if a new one doesn't mark itself valid.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# Wi-Fi co-processor: the P4-NANO used here carries an ESP32-C5 (esp-hosted 2.12.9), not a C6.
+CONFIG_SLAVE_IDF_TARGET_ESP32C5=y
