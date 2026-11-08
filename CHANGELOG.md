@@ -6,6 +6,9 @@ adds a line under "Unreleased"; the release that raises `VERSION` renames that s
 
 ## Unreleased
 
+### Changed
+- Key images reach the deck about six times faster: full-deck redraws went from 3–4 to over 20 a second.
+
 ## [0.1.0] - 2026-11-08
 
 First release: the Waveshare ESP32-P4-NANO works as a Stream Deck Network Dock.
