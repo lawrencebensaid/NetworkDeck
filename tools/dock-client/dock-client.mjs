@@ -2,12 +2,14 @@
 //
 //   node dock-client.mjs --discover        list docks announced on mDNS
 //   node dock-client.mjs <ip>              read dock info, draw keys, log presses
-//   node dock-client.mjs <ip> --bench      also time full-deck redraws
+//   node dock-client.mjs <ip> --bench      also time full-deck redraws (--frames N, default 20)
 import { StreamDeckTcpConnectionManager, StreamDeckTcpDiscoveryService } from '@elgato-stream-deck/tcp'
 
 const args = process.argv.slice(2)
-const ip = args.find((a) => !a.startsWith('--'))
+const ip = args.find((a, i) => !a.startsWith('--') && args[i - 1] !== '--frames')
 const bench = args.includes('--bench')
+const framesArg = args.indexOf('--frames')
+const benchFrames = framesArg >= 0 ? Number(args[framesArg + 1]) : 20
 
 if (args.includes('--discover')) {
 	const discovery = new StreamDeckTcpDiscoveryService()
@@ -32,7 +34,7 @@ function hueColor(i, n) {
 async function benchmark(deck) {
 	const keys = deck.CONTROLS.filter((c) => c.type === 'button' && c.feedbackType === 'lcd')
 	const { width, height } = keys[0].pixelSize
-	const frames = 20
+	const frames = benchFrames
 	const t0 = performance.now()
 	for (let f = 0; f < frames; f++) {
 		await Promise.all(

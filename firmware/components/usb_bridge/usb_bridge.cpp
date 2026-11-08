@@ -13,7 +13,6 @@
 #include "hidparse/hid_descriptor.hpp"
 #include "usb/usb_host.h"
 
-extern "C" volatile uint32_t deck32_intr_out_naks;  // vendor/usb patch 2: NAKed interrupt OUT retries
 
 namespace usb_bridge {
 namespace {
@@ -236,10 +235,13 @@ void close_device() {
     for (int i = 0; i < 100 && g_inflight > 0; ++i) usb_host_client_handle_events(g_client, pdMS_TO_TICKS(10));
     if (g_inflight > 0) ESP_LOGW(TAG, "%d transfers still in flight at close", g_inflight.load());
 
+    // Control users (set/get_feature, write) check g_attached under this mutex before touching xctrl.
+    xSemaphoreTake(g_ctrl_mutex, portMAX_DELAY);
     if (g_dev.claimed) usb_host_interface_release(g_client, g_dev.hdl, g_dev.iface);
     free_transfers();
     usb_host_device_close(g_client, g_dev.hdl);
     g_dev = Device{};
+    xSemaphoreGive(g_ctrl_mutex);
     g_inflight = 0;
     g_out_busy = false;
     ESP_LOGI(TAG, "deck closed");
@@ -290,6 +292,12 @@ void open_device(uint8_t addr) {
         g_dev.sizes = hidparse::parse(g_dev.xctrl->data_buffer + sizeof(usb_setup_packet_t), got);
     } else {
         ESP_LOGW(TAG, "report descriptor read failed (%s); using endpoint sizes", esp_err_to_name(err));
+    }
+    {
+        // SET_IDLE(0): report only on change, no repeats. Host HID stacks send this on attach.
+        const esp_err_t idle = control(USB_BM_REQUEST_TYPE_DIR_OUT | USB_BM_REQUEST_TYPE_TYPE_CLASS | USB_BM_REQUEST_TYPE_RECIP_INTERFACE,
+                                       0x0A /* SET_IDLE */, 0, g_dev.iface, 0, nullptr);
+        ESP_LOGI(TAG, "SET_IDLE: %s", esp_err_to_name(idle));
     }
 
     auto biggest = [](const std::map<uint8_t, uint16_t>& m, uint16_t fallback) {
@@ -379,7 +387,6 @@ void client_task(void*) {
                          static_cast<unsigned>(pdTICKS_TO_MS(last_check - g_out_since)),
                          static_cast<unsigned>(uxQueueMessagesWaiting(g_out_q)));
             }
-            ESP_LOGD(TAG, "%u OUT NAK retries so far", static_cast<unsigned>(deck32_intr_out_naks));
         }
         if (g_gone.exchange(false)) {
             // close_device() fires on_detach only if we were attached; DEV_GONE already cleared it.
@@ -405,6 +412,24 @@ void lib_task(void*) {
 }
 
 }  // namespace
+
+// GET_REPORT on EP0 (HID 1.11 7.2.1: mandatory for every report type).
+esp_err_t get_report(uint8_t type, uint8_t id, uint16_t size, std::vector<uint8_t>& out) {
+    xSemaphoreTake(g_ctrl_mutex, portMAX_DELAY);
+    if (!g_attached || !g_dev.xctrl) {
+        xSemaphoreGive(g_ctrl_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
+    int got = 0;
+    esp_err_t err = control(USB_BM_REQUEST_TYPE_DIR_IN | USB_BM_REQUEST_TYPE_TYPE_CLASS | USB_BM_REQUEST_TYPE_RECIP_INTERFACE,
+                            0x01 /* GET_REPORT */, static_cast<uint16_t>((type << 8) | id), g_dev.iface, size, &got);
+    if (err == ESP_OK) {
+        const uint8_t* buf = g_dev.xctrl->data_buffer + sizeof(usb_setup_packet_t);
+        out.assign(buf, buf + std::max(got, 0));
+    }
+    xSemaphoreGive(g_ctrl_mutex);
+    return err;
+}
 
 esp_err_t start(const Callbacks& callbacks) {
     g_cb = callbacks;
@@ -453,6 +478,10 @@ bool write(const uint8_t* data, size_t len, TickType_t wait) {
 esp_err_t set_feature(const uint8_t* data, size_t len) {
     if (!g_attached || len == 0) return ESP_ERR_INVALID_STATE;
     xSemaphoreTake(g_ctrl_mutex, portMAX_DELAY);
+    if (!g_attached || !g_dev.xctrl) {
+        xSemaphoreGive(g_ctrl_mutex);
+        return ESP_ERR_INVALID_STATE;
+    }
     const uint8_t id = data[0];
     const uint16_t size = std::min<uint16_t>(feature_size(id, len), kCtrlMax);
     uint8_t* buf = g_dev.xctrl->data_buffer + sizeof(usb_setup_packet_t);
@@ -467,17 +496,7 @@ esp_err_t set_feature(const uint8_t* data, size_t len) {
 
 esp_err_t get_feature(uint8_t report_id, std::vector<uint8_t>& out) {
     if (!g_attached) return ESP_ERR_INVALID_STATE;
-    xSemaphoreTake(g_ctrl_mutex, portMAX_DELAY);
-    const uint16_t size = std::min<uint16_t>(feature_size(report_id, 32), kCtrlMax);
-    int got = 0;
-    esp_err_t err = control(USB_BM_REQUEST_TYPE_DIR_IN | USB_BM_REQUEST_TYPE_TYPE_CLASS | USB_BM_REQUEST_TYPE_RECIP_INTERFACE,
-                            0x01 /* GET_REPORT */, static_cast<uint16_t>((kFeature << 8) | report_id), g_dev.iface, size,
-                            &got);
-    if (err == ESP_OK) {
-        const uint8_t* buf = g_dev.xctrl->data_buffer + sizeof(usb_setup_packet_t);
-        out.assign(buf, buf + std::max(got, 0));
-    }
-    xSemaphoreGive(g_ctrl_mutex);
+    esp_err_t err = get_report(kFeature, report_id, std::min<uint16_t>(feature_size(report_id, 32), kCtrlMax), out);
     if (err != ESP_OK) ESP_LOGW(TAG, "GET_REPORT 0x%02x failed: %s", report_id, esp_err_to_name(err));
     return err;
 }
