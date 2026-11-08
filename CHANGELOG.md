@@ -6,6 +6,10 @@ adds a line under "Unreleased"; the release that raises `VERSION` renames that s
 
 ## Unreleased
 
+### Fixed
+- Network-dock replies now use the active interface's actual IPv4 lease and subnet mask instead
+  of assuming DHCP is always /24; early network callbacks survive server initialization.
+
 ## [0.1.0] - 2026-11-08
 
 First release: the Waveshare ESP32-P4-NANO works as a Stream Deck Network Dock.

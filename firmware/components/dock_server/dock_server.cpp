@@ -41,6 +41,7 @@ struct Slot {
 };
 
 Config g_config;
+bool g_network_published = false;  // guarded by g_mutex; net callbacks may precede start()
 std::mutex g_mutex;  // guards g_slot and g_child, and keeps Conns alive while others send on them
 Slot g_slot;
 cora::ChildInfo g_child;
@@ -263,7 +264,17 @@ void send_plug_event_locked() {
 }  // namespace
 
 void start(const Config& config) {
-    g_config = config;
+    {
+        // Network callbacks may already be publishing the lease from the net task.
+        std::lock_guard<std::mutex> lock(g_mutex);
+        const auto ip = g_config.identity.ip;
+        const auto mask = g_config.identity.netmask;
+        g_config = config;
+        if (g_network_published) {
+            g_config.identity.ip = ip;
+            g_config.identity.netmask = mask;
+        }
+    }
     xTaskCreatePinnedToCore(listener_task, "dock_listen", 4096, reinterpret_cast<void*>(cora::Port::Dock), 7, nullptr, 1);
     xTaskCreatePinnedToCore(listener_task, "deck_listen", 4096, reinterpret_cast<void*>(cora::Port::Child), 7, nullptr, 1);
 }
@@ -304,6 +315,7 @@ void set_paused(bool paused) { g_paused = paused; }
 
 void set_network(const std::array<uint8_t, 4>& ip, const std::array<uint8_t, 4>& netmask) {
     std::lock_guard<std::mutex> lock(g_mutex);
+    g_network_published = true;
     g_config.identity.ip = ip;
     g_config.identity.netmask = netmask;
 }

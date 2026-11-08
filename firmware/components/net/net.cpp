@@ -60,6 +60,10 @@ std::string ip_str(const esp_ip4_addr_t& a) {
     return b;
 }
 
+settings::Ip4 ip_bytes(const esp_ip4_addr_t& ip) {
+    return {esp_ip4_addr1(&ip), esp_ip4_addr2(&ip), esp_ip4_addr3(&ip), esp_ip4_addr4(&ip)};
+}
+
 esp_ip4_addr_t to_ip(const settings::Ip4& ip) {
     esp_ip4_addr_t a;
     IP4_ADDR(&a, ip[0], ip[1], ip[2], ip[3]);
@@ -223,30 +227,48 @@ void policy_locked(uint32_t boot) {
     }
 
     Status s = g_status;
+    esp_netif_t* active_netif = nullptr;
     if (g_eth_link) {
         s.link = Link::Ethernet;
         s.ip = g_eth_ip;
+        active_netif = g_eth_netif;
     } else if (g_sta_connected && !g_sta_ip.empty()) {
         s.link = Link::Wifi;
         s.ip = g_sta_ip;
+        active_netif = g_sta_netif;
     } else if (g_ap_on) {
         s.link = Link::Hotspot;
         s.ip = g_status.hotspot_ip;
+        active_netif = g_ap_netif;
     } else {
         s.link = Link::None;
         s.ip.clear();
+    }
+    // Report the actual active interface lease (also for static addresses), not a guessed /24.
+    // Refresh even when the IP is unchanged: DHCP can renew with a different subnet mask.
+    s.ip4 = {};
+    s.netmask = {};
+    esp_netif_ip_info_t info{};
+    if (active_netif && !s.ip.empty() && esp_netif_get_ip_info(active_netif, &info) == ESP_OK) {
+        s.ip4 = ip_bytes(info.ip);
+        s.netmask = ip_bytes(info.netmask);
+        s.ip = info.ip.addr ? ip_str(info.ip) : std::string();
+    } else {
+        s.ip.clear();  // no verified lease: do not display an old interface address
     }
     s.wifi_ssid = g_wifi_cfg.ssid;
     if (!g_ap_on) {
         s.hotspot_ssid.clear();
     }
-    const bool changed = s.link != g_status.link || s.ip != g_status.ip || s.hotspot_ssid != g_status.hotspot_ssid ||
+    const bool changed = s.link != g_status.link || s.ip != g_status.ip || s.ip4 != g_status.ip4 ||
+                         s.netmask != g_status.netmask || s.hotspot_ssid != g_status.hotspot_ssid ||
                          s.wifi_ssid != g_status.wifi_ssid;
     const std::string keep_pw = g_status.hotspot_password;
     g_status = s;
     g_status.hotspot_password = keep_pw;
     if (changed) {
-        ESP_LOGI(TAG, "link %s, IP %s", link_name(s.link), s.ip.empty() ? "-" : s.ip.c_str());
+        ESP_LOGI(TAG, "link %s, IP %s, advertised mask %u.%u.%u.%u", link_name(s.link), s.ip.empty() ? "-" : s.ip.c_str(),
+                 s.netmask[0], s.netmask[1], s.netmask[2], s.netmask[3]);
         if (g_on_change) {
             Status copy = g_status;
             if (!g_ap_on) copy.hotspot_password.clear();

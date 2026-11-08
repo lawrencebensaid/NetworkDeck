@@ -162,3 +162,55 @@ TEST_CASE("keepalive ack: only the ACK_NAK form (the app's plain 03 1a Write is 
     b.payload[1] = 0x1A;
     CHECK_FALSE(is_keepalive_ack(b));
 }
+
+TEST_CASE("0x87 preserves non-/24 DHCP masks and both copies of the active IPv4 address") {
+    const std::array<std::array<uint8_t, 4>, 3> masks{{
+        {255, 255, 0, 0}, {255, 255, 254, 0}, {255, 255, 255, 128}
+    }};
+    for (const auto& mask : masks) {
+        auto id = identity();
+        id.ip = {10, 42, 7, 99};
+        id.netmask = mask;
+        const auto reply = dock_report(report::kNetworkConfig, id, mk2());
+        REQUIRE(reply.size() == kReportSize);
+        for (size_t i = 0; i < 4; ++i) {
+            CHECK(reply[4 + i] == id.ip[i]);
+            CHECK(reply[8 + i] == mask[i]);
+            CHECK(reply[12 + i] == id.ip[i]);
+        }
+        CHECK(u16(reply, 16) == kDockPort);
+    }
+}
+
+TEST_CASE("Ethernet to Wi-Fi identity update replaces both addresses and mask, not serial or MAC") {
+    auto id = identity();
+    id.ip = {192, 168, 1, 50};
+    id.netmask = {255, 255, 255, 0};
+    const auto serial = dock_report(report::kSerial, id, mk2());
+    const auto mac = dock_report(report::kMac, id, mk2());
+    id.ip = {10, 42, 7, 99};
+    id.netmask = {255, 255, 0, 0};
+    const auto wifi = dock_report(report::kNetworkConfig, id, mk2());
+    CHECK(wifi[4] == 10);
+    CHECK(wifi[7] == 99);
+    CHECK(wifi[10] == 0);
+    CHECK(wifi[12] == 10);
+    CHECK(wifi[15] == 99);
+    CHECK(dock_report(report::kSerial, id, mk2()) == serial);
+    CHECK(dock_report(report::kMac, id, mk2()) == mac);
+}
+
+TEST_CASE("DHCP mask-only renewal is represented without changing the IP") {
+    auto id = identity();
+    id.ip = {10, 42, 7, 99};
+    id.netmask = {255, 255, 255, 0};
+    const auto before = dock_report(report::kNetworkConfig, id, mk2());
+    id.netmask = {255, 255, 254, 0};
+    const auto after = dock_report(report::kNetworkConfig, id, mk2());
+    CHECK(before[10] == 255);
+    CHECK(after[10] == 254);
+    for (size_t i = 0; i < 4; ++i) {
+        CHECK(before[4 + i] == after[4 + i]);
+        CHECK(before[12 + i] == after[12 + i]);
+    }
+}

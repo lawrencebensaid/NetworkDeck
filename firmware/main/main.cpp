@@ -43,14 +43,7 @@ deck_ui::Ip4 to_ui(const settings::Ip4& ip) { return {ip[0], ip[1], ip[2], ip[3]
 settings::Ip4 from_ui(const deck_ui::Ip4& ip) { return {ip[0], ip[1], ip[2], ip[3]}; }
 
 void publish_net(const net::Status& s) {
-    {
-        unsigned a = 0, b = 0, c = 0, d = 0;
-        std::array<uint8_t, 4> ip{};
-        if (std::sscanf(s.ip.c_str(), "%u.%u.%u.%u", &a, &b, &c, &d) == 4)
-            ip = {static_cast<uint8_t>(a), static_cast<uint8_t>(b), static_cast<uint8_t>(c), static_cast<uint8_t>(d)};
-        const auto cfg = settings::network();
-        dock_server::set_network(ip, cfg.dhcp ? std::array<uint8_t, 4>{255, 255, 255, 0} : cfg.mask);
-    }
+    dock_server::set_network(s.ip4, s.netmask);
     const auto cfg = settings::network();
     deck_ui::NetInfo n;
     n.link = net::link_name(s.link);

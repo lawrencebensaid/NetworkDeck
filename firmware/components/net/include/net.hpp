@@ -19,6 +19,7 @@ const char* link_name(Link l);
 struct Status {
     Link link = Link::None;
     std::string ip;              // address on the active link, empty while there is none
+    settings::Ip4 ip4{}, netmask{}; // actual active netif lease, never inferred from saved defaults
     bool wifi_available = false; // the C6 answered
     std::string wifi_ssid;       // network joined (Link::Wifi)
     std::string hotspot_ssid, hotspot_password;  // set while the hotspot is up
