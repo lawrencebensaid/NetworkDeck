@@ -1,0 +1,12 @@
+{
+  "name": "deck32-dock-client",
+  "private": true,
+  "type": "module",
+  "description": "Drives a Deck32 (or a real Network Dock) through @elgato-stream-deck/tcp, the client Bitfocus Companion uses.",
+  "scripts": {
+    "start": "node dock-client.mjs"
+  },
+  "dependencies": {
+    "@elgato-stream-deck/tcp": "7.8.0"
+  }
+}
