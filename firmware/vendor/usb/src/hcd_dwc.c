@@ -461,55 +461,6 @@ static inline bool _buffer_check_done(pipe_t *pipe)
     return (buffer_inflight->flags.ctrl.cur_stg == 2);
 }
 
-// ---------------------------------------------------------------------------------------------------
-// Deck32 patches (see vendor/usb/DECK32_PATCH.md)
-
-// 1. The HAL never sets HCCHAR.EC (multi count). For a periodic endpoint without split transactions the
-//    DWC databook calls EC=0 reserved ("undefined behavior"). EC=1 = one transaction per (micro)frame.
-static inline void _deck32_chan_set_ep_char(usb_dwc_hal_context_t *hal, usb_dwc_hal_chan_t *chan_obj, usb_dwc_hal_ep_char_t *ep_char)
-{
-    usb_dwc_hal_chan_set_ep_char(hal, chan_obj, ep_char);
-    if (ep_char->type == USB_DWC_XFER_TYPE_INTR || ep_char->type == USB_DWC_XFER_TYPE_ISOCHRONOUS) {
-        chan_obj->regs->hcchar_reg.ec = 1;
-    }
-}
-
-// 2. When the device NAKs an interrupt OUT packet, the core retires the descriptor untouched (inactive,
-//    status success, full length remaining) and halts the channel without XferCompl. The HAL reports
-//    that halt as a completion and _buffer_parse_intr() then asserted (espressif/esp-idf#14412). The
-//    NAKed packet also stays in the periodic TX FIFO, which misaligns every later OUT. Like Linux dwc2,
-//    retry it: flush the periodic TX FIFO and run the same single-packet descriptor again.
-volatile uint32_t deck32_intr_out_naks;   // read by usb_bridge for diagnostics
-static uint32_t s_intr_out_nak_streak;
-static inline void _buffer_fill_intr(dma_buffer_block_t *buffer, usb_transfer_t *transfer, bool is_in, int mps);
-static bool _deck32_retry_nakd_intr_out(pipe_t *pipe)
-{
-    if (pipe->ep_char.type != USB_DWC_XFER_TYPE_INTR || (pipe->ep_char.bEndpointAddress & USB_B_ENDPOINT_ADDRESS_EP_DIR_MASK) ||
-            !pipe->port->flags.conn_dev_ena) {
-        return false;
-    }
-    dma_buffer_block_t *buffer = pipe->buffers[pipe->multi_buffer_control.rd_idx];
-    if (buffer->urb == NULL || buffer->flags.intr.num_qtds != 1 || buffer->flags.intr.zero_len_packet) {
-        return false;
-    }
-    CACHE_SYNC_XFER_DESCRIPTOR_LIST_M2C(buffer);
-    usb_dwc_ll_dma_qtd_t *qtd = &((usb_dwc_ll_dma_qtd_t *)buffer->xfer_desc_list)[0];
-    const bool nakd = !qtd->out_non_iso.active && qtd->out_non_iso.tx_status == USB_DWC_LL_QTD_STATUS_SUCCESS &&
-                      qtd->out_non_iso.xfer_size == (uint32_t)buffer->urb->transfer.num_bytes && buffer->urb->transfer.num_bytes > 0;
-    if (!nakd || ++s_intr_out_nak_streak > 40000) {   // ~5 s of NAKs at one try per microframe: give up
-        s_intr_out_nak_streak = 0;
-        return false;
-    }
-    deck32_intr_out_naks++;
-    usb_dwc_ll_grstctl_flush_ptx_fifo(pipe->port->hal->dev);
-    _buffer_fill_intr(buffer, &buffer->urb->transfer, false, pipe->ep_char.mps);
-    CACHE_SYNC_XFER_DESCRIPTOR_LIST_C2M(buffer);
-    usb_dwc_hal_chan_activate(pipe->chan_obj, buffer->xfer_desc_list, 1, 0);
-    return true;
-}
-// ---------------------------------------------------------------------------------------------------
-
-
 /**
  * @brief Continue execution of a buffer
  *
@@ -1032,10 +983,6 @@ static hcd_pipe_event_t _intr_hdlr_chan(pipe_t *pipe, usb_dwc_hal_chan_t *chan_o
 
     switch (chan_event) {
     case USB_DWC_HAL_CHAN_EVENT_CPLT: {
-        if (_deck32_retry_nakd_intr_out(pipe)) {   // Deck32 patch 2
-            break;
-        }
-        s_intr_out_nak_streak = 0;
         if (!_buffer_check_done(pipe)) {
             _buffer_exec_cont(pipe);
             break;
@@ -1177,9 +1124,15 @@ static void  _calculate_fifo_from_bias(port_t *port, const usb_dwc_hal_context_t
 
 #elif CONFIG_USB_HOST_HW_BUFFER_BIAS_PERIODIC_OUT
     // Prioritize periodic TX FIFO (useful for high throughput periodic endpoints)
-    port->fifo_config.rx_fifo_lines = otg_dfifo_depth / 8 + 2; // 2 extra lines are allocated for status information. See USB-OTG Programming Guide, chapter 2.1.2.1
+    // Deck32 patch: upstream gives RX exactly one 512-byte packet plus 2 status lines (130 lines). A
+    // high-speed 512-byte interrupt IN needs at least 3 spare lines (espressif/esp-idf#19143); with 2 the
+    // IN channel never receives data, completes empty thousands of times a second, and interrupt OUT
+    // asserts in _buffer_parse_intr (espressif/esp-idf#14412). Give RX two packets plus status.
+    port->fifo_config.rx_fifo_lines = 2 * (otg_dfifo_depth / 8) + 8;
     port->fifo_config.nptx_fifo_lines = otg_dfifo_depth / 16;
     port->fifo_config.ptx_fifo_lines = fifo_size_lines - port->fifo_config.nptx_fifo_lines - port->fifo_config.rx_fifo_lines;
+    ESP_LOGI(HCD_DWC_TAG, "FIFO lines: rx %u, nptx %u, ptx %u of %u", (unsigned)port->fifo_config.rx_fifo_lines,
+             (unsigned)port->fifo_config.nptx_fifo_lines, (unsigned)port->fifo_config.ptx_fifo_lines, (unsigned)fifo_size_lines);
 
 #else // USB_HOST_HW_BUFFER_BIAS_BALANCED
     // Balanced configuration (default)
@@ -1271,7 +1224,7 @@ static void _port_reset_all_pipes(port_t *port)
 {
     pipe_t *pipe;
     TAILQ_FOREACH(pipe, &port->pipes_idle_tailq, tailq_entry) {
-        _deck32_chan_set_ep_char(port->hal, pipe->chan_obj, &pipe->ep_char);
+        usb_dwc_hal_chan_set_ep_char(port->hal, pipe->chan_obj, &pipe->ep_char);
     }
     CACHE_SYNC_FRAME_LIST(port->frame_list);
 }
@@ -2242,7 +2195,7 @@ esp_err_t hcd_pipe_alloc(hcd_port_handle_t port_hdl, const hcd_pipe_config_t *pi
         ret = ESP_ERR_NOT_SUPPORTED;
         goto err;
     }
-    _deck32_chan_set_ep_char(port->hal, pipe->chan_obj, &pipe->ep_char);
+    usb_dwc_hal_chan_set_ep_char(port->hal, pipe->chan_obj, &pipe->ep_char);
     CACHE_SYNC_FRAME_LIST(port->frame_list);
     // Add the pipe to the list of idle pipes in the port object
     TAILQ_INSERT_TAIL(&port->pipes_idle_tailq, pipe, tailq_entry);
@@ -2322,7 +2275,7 @@ esp_err_t hcd_pipe_update_mps(hcd_pipe_handle_t pipe_hdl, int mps)
                         ESP_ERR_INVALID_STATE);
     pipe->ep_char.mps = mps;
     // Update the underlying channel's registers
-    _deck32_chan_set_ep_char(pipe->port->hal, pipe->chan_obj, &pipe->ep_char);
+    usb_dwc_hal_chan_set_ep_char(pipe->port->hal, pipe->chan_obj, &pipe->ep_char);
     HCD_EXIT_CRITICAL();
     return ESP_OK;
 }
@@ -2337,7 +2290,7 @@ esp_err_t hcd_pipe_update_dev_addr(hcd_pipe_handle_t pipe_hdl, uint8_t dev_addr)
                         ESP_ERR_INVALID_STATE);
     pipe->ep_char.dev_addr = dev_addr;
     // Update the underlying channel's registers
-    _deck32_chan_set_ep_char(pipe->port->hal, pipe->chan_obj, &pipe->ep_char);
+    usb_dwc_hal_chan_set_ep_char(pipe->port->hal, pipe->chan_obj, &pipe->ep_char);
     HCD_EXIT_CRITICAL();
     return ESP_OK;
 }
@@ -2761,13 +2714,7 @@ static inline void _buffer_parse_intr(dma_buffer_block_t *buffer, bool is_in, in
             int rem_len;
             int desc_status;
             usb_dwc_hal_xfer_desc_parse(buffer->xfer_desc_list, i, &rem_len, &desc_status);
-            if (rem_len != 0 || desc_status != USB_DWC_HAL_XFER_DESC_STS_SUCCESS) {
-                // Deck32 patch 3: report an unsent OUT as a transfer error instead of asserting
-                transfer->actual_num_bytes = 0;
-                transfer->status = USB_TRANSFER_STATUS_ERROR;
-                memset(buffer->xfer_desc_list, 0, XFER_LIST_LEN_INTR * sizeof(usb_dwc_ll_dma_qtd_t));
-                return;
-            }
+            assert(rem_len == 0 && desc_status == USB_DWC_HAL_XFER_DESC_STS_SUCCESS);
         }
         transfer->actual_num_bytes = transfer->num_bytes;
     }
