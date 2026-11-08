@@ -4,6 +4,7 @@
 // deck_ui (the dock's own screens) otherwise; net, settings, web and OTA around them.
 
 #include <cstdio>
+#include <mutex>
 #include <string>
 
 #include "deck_ui/deck.hpp"
@@ -78,6 +79,10 @@ void apply_network(const settings::Network& n) {
 // A confirmation on the deck. While the Stream Deck app is connected, its traffic to the deck is held
 // back for the prompt, and the deck is virtually replugged afterwards so the app draws again.
 bool ask(const std::string& question) {
+    // Serialize the entire ownership interval, not only deck_ui::confirm(). Otherwise a
+    // completed request could unpause host rendering while the next prompt is displayed.
+    static std::mutex prompt_mutex;
+    std::lock_guard<std::mutex> lock(prompt_mutex);
     const bool host = dock_server::host_connected();
     if (host) dock_server::set_paused(true);
     const bool yes = deck_ui::confirm(question);
