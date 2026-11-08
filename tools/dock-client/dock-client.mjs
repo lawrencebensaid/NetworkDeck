@@ -49,6 +49,9 @@ async function benchmark(deck) {
 			}),
 		)
 	}
+	// Writes resolve once they're in the socket. A feature read queues behind them on the dock, so its
+	// reply means every image reached the deck.
+	await deck.getFirmwareVersion()
 	const ms = performance.now() - t0
 	console.log(`bench: ${frames} full redraws of ${keys.length} keys in ${ms.toFixed(0)} ms → ${((frames * 1000) / ms).toFixed(1)} fps`)
 }
