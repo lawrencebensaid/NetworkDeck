@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <cerrno>
+#include <deque>
 #include <mutex>
 
 #include "cora/session.hpp"
@@ -44,6 +45,18 @@ std::mutex g_mutex;  // guards g_slot and g_child, and keeps Conns alive while o
 Slot g_slot;
 cora::ChildInfo g_child;
 std::atomic<uint8_t> g_conn_no{0};
+std::atomic<bool> g_paused{false};
+
+std::mutex g_trace_mutex;
+std::deque<std::string> g_trace;
+constexpr size_t kTraceLines = 200;
+
+void trace_add(const char* what, const cora::Frame& f) {
+    std::string line = std::to_string(static_cast<unsigned>(esp_timer_get_time() / 1000)) + " " + what + " " + cora::describe(f);
+    std::lock_guard<std::mutex> lock(g_trace_mutex);
+    g_trace.push_back(std::move(line));
+    if (g_trace.size() > kTraceLines) g_trace.pop_front();
+}
 
 const char* port_name(cora::Port p) { return p == cora::Port::Dock ? "dock" : "deck"; }
 
@@ -70,6 +83,11 @@ bool send_frame(Conn* c, const cora::Frame& f) {
     return ok;
 }
 
+cora::DockIdentity identity_snapshot() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_config.identity;
+}
+
 cora::ChildInfo child_snapshot() {
     std::lock_guard<std::mutex> lock(g_mutex);
     return g_child;
@@ -82,9 +100,11 @@ bool execute(Conn* c, const cora::Action& a) {
         case K::Send:
             if (!(a.frame.payload.size() >= 2 && a.frame.payload[0] == 0x01 && a.frame.payload[1] == 0x0A)) {  // not keepalives
                 ESP_LOGI(TAG, "%s → %s", port_name(c->port), cora::describe(a.frame).c_str());
+                trace_add(c->port == cora::Port::Dock ? "dock >" : "deck >", a.frame);
             }
             return send_frame(c, a.frame);
         case K::UsbWrite: {
+            if (g_paused) return true;  // the dock is showing a prompt; the host redraws after the replug
             // Blocking here stops us reading the socket: TCP then slows the host down.
             while (!usb_bridge::write(a.frame.payload.data(), a.frame.payload.size(), pdMS_TO_TICKS(200))) {
                 if (!usb_bridge::attached()) return true;  // deck gone: drop, the plug event tells the host
@@ -94,19 +114,21 @@ bool execute(Conn* c, const cora::Action& a) {
             return true;
         }
         case K::UsbSetFeature:
+            if (g_paused) return true;
             ESP_LOGI(TAG, "deck ← set %s", cora::describe(a.frame).c_str());
             usb_bridge::set_feature(a.frame.payload.data(), a.frame.payload.size());
             return true;
         case K::UsbGetFeature: {
             std::vector<uint8_t> report;
-            const uint8_t id = a.frame.payload[0];
+            const uint8_t id = a.report_id;
             if (usb_bridge::get_feature(id, report) != ESP_OK) return true;  // host times out on its own
-            auto reply = cora::Session::feature_result(a.frame.message_id, std::move(report));
+            auto reply = cora::Session::feature_result(a, std::move(report));
             ESP_LOGI(TAG, "deck get 0x%02x → %s", id, cora::describe(reply).c_str());
             return send_frame(c, reply);
         }
         case K::Unknown:
             ESP_LOGW(TAG, "%s ? %s", port_name(c->port), cora::describe(a.frame).c_str());
+            trace_add(c->port == cora::Port::Dock ? "dock ?" : "deck ?", a.frame);
             return true;
     }
     return true;
@@ -130,7 +152,7 @@ void conn_task(void* arg) {
         int n = recv(c->fd, buf, kBuf, 0);
         const uint32_t now = Conn::now_ms();
         if (n > 0) {
-            for (const auto& a : c->session.on_bytes(buf, static_cast<size_t>(n), g_config.identity, child_snapshot(), now)) {
+            for (const auto& a : c->session.on_bytes(buf, static_cast<size_t>(n), identity_snapshot(), child_snapshot(), now)) {
                 if (!(alive = execute(c, a))) break;
             }
         } else if (n == 0) {
@@ -257,6 +279,8 @@ void deck_attached(const usb_bridge::DeckInfo& info) {
     g_child.vid = info.vid;
     g_child.pid = info.pid;
     g_child.serial = info.serial;
+    g_child.name = info.product;
+    g_child.bcd_device = info.bcd_device ? info.bcd_device : 0x0100;
     g_child.tcp_port = cora::kChildPort;
     send_plug_event_locked();
 }
@@ -269,8 +293,43 @@ void deck_detached() {
 }
 
 void deck_input(const uint8_t* report, size_t len) {
+    if (g_paused) return;
     std::lock_guard<std::mutex> lock(g_mutex);
-    if (g_slot.child) send_frame(g_slot.child, cora::Session::input_frame(report, len));
+    // The open-source client reads keys on the child connection; the official app on the dock one.
+    Conn* to = g_slot.child ? g_slot.child : g_slot.dock;
+    if (to) send_frame(to, cora::Session::input_frame(report, len));
+}
+
+void set_paused(bool paused) { g_paused = paused; }
+
+void set_network(const std::array<uint8_t, 4>& ip, const std::array<uint8_t, 4>& netmask) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_config.identity.ip = ip;
+    g_config.identity.netmask = netmask;
+}
+
+void replug() {
+    cora::ChildInfo attached;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (!g_child.attached) return;
+        attached = g_child;
+        g_child = cora::ChildInfo{};
+        send_plug_event_locked();
+        if (g_slot.child) shutdown(g_slot.child->fd, SHUT_RDWR);
+    }
+    ESP_LOGI(TAG, "virtual replug");
+    vTaskDelay(pdMS_TO_TICKS(500));
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_child = attached;
+    send_plug_event_locked();
+}
+
+std::string trace() {
+    std::lock_guard<std::mutex> lock(g_trace_mutex);
+    std::string out;
+    for (const auto& l : g_trace) out += l + "\n";
+    return out;
 }
 
 }  // namespace dock_server

@@ -20,11 +20,12 @@ struct Action {
         Send,           // send `frame` to the host
         UsbWrite,       // interrupt OUT: frame.payload is the output report
         UsbSetFeature,  // SET_REPORT(Feature): frame.payload is the report, starting with its id
-        UsbGetFeature,  // GET_REPORT(Feature, frame.payload[0]); reply with feature_result(frame.message_id, …)
+        UsbGetFeature,  // GET_REPORT(Feature, report_id); reply with Session::feature_result(action, …)
         Unknown,        // not understood: log `frame` for reverse engineering
     };
     Kind kind;
-    Frame frame;
+    Frame frame;        // the request (or, for Send, the frame to send)
+    uint8_t report_id = 0;
 };
 
 class Session {
@@ -43,7 +44,8 @@ public:
     uint8_t conn_no() const { return conn_no_; }
 
     static Frame input_frame(const uint8_t* report, size_t len);
-    static Frame feature_result(uint32_t message_id, std::vector<uint8_t> report);
+    // Reply to a UsbGetFeature action with the report read from the deck.
+    static Frame feature_result(const Action& request, std::vector<uint8_t> report);
     static Frame plug_event(const ChildInfo& child);
 
 private:
@@ -56,6 +58,7 @@ private:
     Decoder decoder_;
     uint32_t last_rx_ms_;
     uint32_t last_keepalive_ms_;
+    bool hotplug_sent_ = false;  // pushed 01 0B after the app's first watchdog poll
 };
 
 }  // namespace cora

@@ -16,6 +16,8 @@ namespace usb_bridge {
 struct DeckInfo {
     uint16_t vid = 0;
     uint16_t pid = 0;
+    uint16_t bcd_device = 0;
+    std::string product;  // USB product string
     std::string serial;
     uint16_t input_size = 0;   // bytes per interrupt IN report
     uint16_t output_size = 0;  // bytes per interrupt OUT report
