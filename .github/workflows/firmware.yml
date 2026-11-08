@@ -1,0 +1,166 @@
+# Tests and builds every change; a new version on main becomes a GitHub release.
+#
+# Pull requests (into develop): host tests, then the firmware build (VERSION-alpha.pr<n>.<run>), kept as
+# an artifact of the run. Pushes to develop: the same, as VERSION-beta.<run>. Pushes to main (merging
+# develop): when VERSION is higher than the last release tag, a GitHub release v<VERSION> with the
+# files to flash. Raise VERSION (and name the CHANGELOG.md section) in the pull request that should
+# release.
+#
+# Runs on the self-hosted runner in the k3s cluster (label networkdeck-ci, namespace github-runners;
+# see deploy/ci-runner/), inside Espressif's ESP-IDF image: the same IDF version as local builds.
+name: firmware
+
+on:
+  pull_request:
+  push:
+    branches: [develop, main]
+
+concurrency:
+  group: firmware-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  plan:
+    # A public repository's self-hosted runner must not run code from forks.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, networkdeck-ci]
+    container: espressif/idf:v6.1
+    outputs:
+      version: ${{ steps.plan.outputs.version }}
+      release: ${{ steps.plan.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # the release check reads the tags
+      - name: Decide the version and whether this is a release
+        id: plan
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          base=$(tr -d ' \n' < VERSION)
+          if ! [[ $base =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error file=VERSION::VERSION must be major.minor.patch, not '$base'"; exit 1
+          fi
+          release=false
+          case "$GITHUB_EVENT_NAME:$GITHUB_REF" in
+            push:refs/heads/main)
+              version=$base
+              last=$(git tag -l 'v*' | sort -V | tail -n1)
+              if [ "$last" = "v$base" ]; then
+                echo "v$base is already released; VERSION was not raised, so no release."
+              elif [ -n "$last" ] && [ "$(printf '%s\n' "${last#v}" "$base" | sort -V | tail -n1)" != "$base" ]; then
+                echo "::error file=VERSION::VERSION $base is lower than the last release $last"; exit 1
+              else
+                release=true; echo "Releasing v$base (last release: ${last:-none})."
+              fi ;;
+            push:refs/heads/develop) version="$base-beta.$GITHUB_RUN_NUMBER" ;;
+            pull_request:*) version="$base-alpha.pr${{ github.event.pull_request.number }}.$GITHUB_RUN_NUMBER" ;;
+            *) version="$base-dev.$GITHUB_RUN_NUMBER" ;;
+          esac
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "release=$release" >> "$GITHUB_OUTPUT"
+          echo "Building $version"
+
+  tests:
+    needs: plan
+    runs-on: [self-hosted, linux, networkdeck-ci]
+    container: espressif/idf:v6.1
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Host tests (protocol core, HID parser, deck screens)
+        shell: bash
+        run: |
+          export DEBIAN_FRONTEND=noninteractive
+          apt-get update -qq && apt-get install -y -qq --no-install-recommends build-essential ninja-build > /dev/null
+          cmake -S firmware/test/host -B build/host -G Ninja > /dev/null
+          cmake --build build/host
+          build/host/deck32_tests
+
+  build:
+    needs: [plan, tests]
+    runs-on: [self-hosted, linux, networkdeck-ci]
+    container: espressif/idf:v6.1
+    timeout-minutes: 45
+    env:
+      NETWORKDECK_VERSION: ${{ needs.plan.outputs.version }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the firmware
+        working-directory: firmware
+        run: |
+          . "$IDF_PATH/export.sh" > /dev/null
+          idf.py build
+      - name: Package
+        id: package
+        working-directory: firmware
+        run: |
+          apt-get update -qq > /dev/null 2>&1; apt-get install -y -qq --no-install-recommends zip > /dev/null 2>&1 || true
+          . "$IDF_PATH/export.sh" > /dev/null
+          name=networkdeck-$NETWORKDECK_VERSION
+          dist=$GITHUB_WORKSPACE/dist
+          mkdir -p "$dist/$name"
+          (cd build && python -m esptool --chip esp32p4 merge-bin -o "$dist/$name-full.bin" @flash_args)
+          cp build/deck32.bin "$dist/$name.bin"
+          cp build/deck32.elf "$dist/$name.elf"
+          mkdir -p "$dist/$name/bootloader" "$dist/$name/partition_table"
+          cp build/bootloader/bootloader.bin "$dist/$name/bootloader/"
+          cp build/partition_table/partition-table.bin "$dist/$name/partition_table/"
+          cp build/deck32.bin build/ota_data_initial.bin build/flash_args "$dist/$name/"
+          cat > "$dist/$name/FLASHING.txt" <<TXT
+          NetworkDeck $NETWORKDECK_VERSION for the Waveshare ESP32-P4-NANO. Flash over the board's Type-C port.
+
+          From this folder, with ESP-IDF's environment (or pip install esptool):
+            python -m esptool --chip esp32p4 -p <port> -b 460800 write-flash @flash_args
+
+          Or the single image from the release: write networkdeck-$NETWORKDECK_VERSION-full.bin at 0x0.
+          Later updates: upload networkdeck-$NETWORKDECK_VERSION.bin in the dock's web interface.
+          TXT
+          (cd "$dist" && zip -qr "$name.zip" "$name" && rm -rf "$name")
+          (cd "$dist" && sha256sum * > SHA256SUMS)
+          echo "name=$name" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.package.outputs.name }}
+          path: dist/
+          retention-days: 14
+          if-no-files-found: error
+
+  release:
+    needs: [plan, build]
+    if: needs.plan.outputs.release == 'true'
+    runs-on: [self-hosted, linux, networkdeck-ci]
+    container: espressif/idf:v6.1
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Write the release description
+        shell: bash
+        run: |
+          v=${{ needs.plan.outputs.version }}
+          {
+            awk -v v="$v" '$0 ~ "^## \\[" v "\\]" {f=1; next} f && /^## / {exit} f' CHANGELOG.md
+            echo
+            echo "Firmware $v for the Waveshare ESP32-P4-NANO (PoE)."
+            echo
+            echo '- `networkdeck-*-full.bin`: everything, to write at 0x0 over USB (first install).'
+            echo '- `networkdeck-*.bin`: the app alone, for the web interface'"'"'s firmware upload.'
+            echo '- `networkdeck-*.zip`: the separate images with `flash_args`.'
+            echo '- `networkdeck-*.elf`: the matching ELF, to decode a crash backtrace.'
+          } > release-body.md
+          cat release-body.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ needs.plan.outputs.version }}
+          name: NetworkDeck ${{ needs.plan.outputs.version }}
+          target_commitish: ${{ github.sha }}
+          body_path: release-body.md
+          files: dist/*
