@@ -23,6 +23,8 @@ inline constexpr uint8_t kFirmware = 0x83;
 inline constexpr uint8_t kSerial = 0x84;
 inline constexpr uint8_t kMac = 0x85;
 inline constexpr uint8_t kDevice2Info = 0x1C;
+// Number of client connections: 03 8f <len u16 = 2> <a> <b>. The Stream Deck app asks before pairing.
+inline constexpr uint8_t kClientCount = 0x8F;
 }  // namespace report
 
 struct DockIdentity {
