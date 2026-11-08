@@ -274,8 +274,7 @@ Holding the P4-NANO's BOOT button for 10 s erases the network and Wi-Fi settings
   It runs discovery, reads the dock info, connects to the deck, fills all keys, reads key presses,
   sets brightness, and simulates unplug and replug. It also measures key-press latency and full-deck
   redraw frame rate, on both Ethernet and Wi-Fi.
-- **Official app:** pair through "Add Network Device…", load the user's existing profiles (homelab-deck,
-  agentgrid), and watch `/trace` for unknown requests until there are none.
+- **Official app:** pair through "Add Network Device…", load the user's existing profiles, and watch `/trace` for unknown requests until there are none.
 - **Hardware:** MK.2 and Mini; PoE power; deck power at 0.7 A on the Type-A port.
 
 **Targets, measured and not assumed:**
