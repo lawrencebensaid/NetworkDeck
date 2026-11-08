@@ -3,7 +3,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <array>
 #include <functional>
+#include <string>
 
 #include "cora/protocol.hpp"
 #include "usb_bridge.hpp"
@@ -24,5 +26,16 @@ bool host_connected();
 void deck_attached(const usb_bridge::DeckInfo& info);
 void deck_detached();
 void deck_input(const uint8_t* report, size_t len);
+
+// The dock's current address, reported in the 0x87 network configuration.
+void set_network(const std::array<uint8_t, 4>& ip, const std::array<uint8_t, 4>& netmask);
+
+// While paused (a prompt on the deck), traffic from the host to the deck is dropped.
+void set_paused(bool paused);
+// Virtual unplug and replug of the deck, so the host draws its profile again.
+void replug();
+
+// The last protocol frames in and out, oldest first, one per line (for the web interface).
+std::string trace();
 
 }  // namespace dock_server

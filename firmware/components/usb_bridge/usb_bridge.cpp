@@ -328,6 +328,8 @@ void open_device(uint8_t addr) {
         g_dev.info.vid = dd->idVendor;
         g_dev.info.pid = dd->idProduct;
         g_dev.info.serial = utf16_to_ascii(dinfo.str_desc_serial_num);
+        g_dev.info.product = utf16_to_ascii(dinfo.str_desc_product);
+        g_dev.info.bcd_device = dd->bcdDevice;
         g_dev.info.input_size = in_size;
         g_dev.info.output_size = out_size;
     }

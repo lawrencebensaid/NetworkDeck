@@ -60,10 +60,16 @@ TEST_CASE("unknown dock report ids produce no reply") {
     CHECK(dock_report(0x42, identity(), mk2()).empty());
 }
 
-TEST_CASE("device 2 info describes an attached deck") {
+TEST_CASE("device 2 info describes an attached deck (reply form 03 1c, push form 01 0b)") {
     auto b = device2_info(mk2());
-    CHECK(b[0] == 0x01);
-    CHECK(b[1] == 0x0B);
+    CHECK(b[0] == 0x03);
+    CHECK(b[1] == 0x1C);
+    CHECK(u16(b, 2) == 124);
+    CHECK(u16(b, 30) == 0x0100);
+    CHECK(std::string(reinterpret_cast<const char*>(&b[64])) == "Elgato");
+    auto push = device2_info(mk2(), true);
+    CHECK(push[0] == 0x01);
+    CHECK(push[1] == 0x0B);
     CHECK(b[4] == 0x02);
     CHECK(u16(b, 26) == 0x0FD9);
     CHECK(u16(b, 28) == 0x0080);
@@ -73,7 +79,7 @@ TEST_CASE("device 2 info describes an attached deck") {
 
 TEST_CASE("device 2 info says nothing is connected when detached") {
     ChildInfo none;
-    auto b = device2_info(none);
+    auto b = device2_info(none, true);
     CHECK(b[0] == 0x01);
     CHECK(b[1] == 0x0B);
     CHECK(b[4] != 0x02);
@@ -102,7 +108,7 @@ TEST_CASE("keepalive payload and its ack") {
     CHECK_FALSE(is_keepalive_ack(ack));
 }
 
-TEST_CASE("client count report (03 8f) has length 2 and no other clients") {
+TEST_CASE("client count report (03 8f): length 2, bytes 01 00 (what the Stream Deck app pairs with)") {
     DockIdentity id;
     id.serial = "D3E8F60AEB204C";
     id.firmware = "1.00.000";
@@ -112,6 +118,47 @@ TEST_CASE("client count report (03 8f) has length 2 and no other clients") {
     CHECK(r[1] == 0x8F);
     CHECK(r[2] == 0x02);
     CHECK(r[3] == 0x00);
-    CHECK(r[4] == 0x00);
-    CHECK(r[5] == 0x01);
+    CHECK(r[4] == 0x01);
+    CHECK(r[5] == 0x00);
+}
+
+TEST_CASE("0x87 is the network configuration; other 0x8x reports get an empty reply") {
+    DockIdentity id;
+    id.serial = "D3E8F60AEB204C";
+    id.firmware = "1.00.000";
+    id.ip = {10, 0, 1, 187};
+    id.netmask = {255, 255, 255, 0};
+    auto r = dock_report(0x87, id, ChildInfo{});
+    REQUIRE(r.size() == kReportSize);
+    CHECK(r[1] == 0x87);
+    CHECK(r[2] == 1);
+    CHECK(r[3] == 1);
+    CHECK(r[4] == 10);
+    CHECK(r[7] == 187);
+    CHECK(r[8] == 255);
+    CHECK((r[16] | (r[17] << 8)) == 5343);
+    auto e = dock_report(0x8B, id, ChildInfo{});
+    REQUIRE(e.size() == kReportSize);
+    CHECK(e[0] == 0x03);
+    CHECK(e[1] == 0x8B);
+    CHECK(dock_report(0x42, id, ChildInfo{}).empty());
+}
+
+TEST_CASE("device 2 info is 128 bytes, like a real dock") {
+    CHECK(device2_info(mk2()).size() == kDevice2InfoSize);
+    CHECK(device2_info(ChildInfo{}).size() == kDevice2InfoSize);
+}
+
+TEST_CASE("keepalive ack: only the ACK_NAK form (the app's plain 03 1a Write is its watchdog poll)") {
+    Frame a;
+    a.flags = flags::kAckNak;
+    a.payload = {0x03, 0x1A, 0x01};
+    CHECK(is_keepalive_ack(a));
+    Frame b;
+    b.flags = flags::kNone;
+    b.op = HidOp::Write;
+    b.payload.assign(1024, 0);
+    b.payload[0] = 0x03;
+    b.payload[1] = 0x1A;
+    CHECK_FALSE(is_keepalive_ack(b));
 }
