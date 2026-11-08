@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>NetworkDeck — Sign in</title>
+<style>
+:root{color-scheme:light dark}body{font:16px/1.5 system-ui;margin:12vh auto;padding:24px;max-width:420px}input,button{font:inherit;box-sizing:border-box;width:100%;padding:12px;margin:10px 0}button{cursor:pointer}p{color:GrayText}#message{white-space:pre-wrap}
+</style>
+<h1 id="title">NetworkDeck</h1>
+<p id="hint"></p>
+<form id="login"><label for="password">Web interface password</label>
+<input id="password" type="password" minlength="12" maxlength="128" autocomplete="current-password" required autofocus>
+<div id="repeat" hidden><label for="confirmation">Repeat password</label><input id="confirmation" type="password" autocomplete="new-password"></div>
+<button id="submit">Sign in</button></form>
+<p id="message" role="status" aria-live="polite"></p>
+<p>This dock currently uses HTTP. Only sign in on a trusted, isolated network; do not reuse another password or expose it to the Internet.</p>
+<p>Forgotten password? Use the physical factory reset on the deck. This also erases network and Wi-Fi settings.</p>
+<script>
+const setup = AUTH_MODE;
+const $ = id => document.getElementById(id);
+$('title').textContent = setup ? 'Set up NetworkDeck' : 'Sign in to NetworkDeck';
+$('hint').textContent = setup ? 'Create a password (12–128 bytes), then approve on the physical deck. Nothing else is accessible until setup is complete.' : 'Sign in to view and manage this dock. Sessions last 30 minutes; signing in replaces the previous session.';
+$('submit').textContent = setup ? 'Set password' : 'Sign in';
+$('password').autocomplete = setup ? 'new-password' : 'current-password';
+$('repeat').hidden = !setup;
+$('confirmation').required = setup;
+$('login').onsubmit = async event => {
+  event.preventDefault();
+  const password = $('password').value;
+  if (setup && password !== $('confirmation').value) { $('message').textContent = 'Passwords do not match.'; return; }
+  const size = new TextEncoder().encode(password).length;
+  if (size < 12 || size > 128) { $('message').textContent = 'Use a password of 12–128 bytes.'; return; }
+  $('submit').disabled = true;
+  $('message').textContent = setup ? 'Confirm on the deck (within 30 seconds)…' : 'Signing in…';
+  try {
+    const response = await fetch('/api/login', {method:'POST',headers:{'Content-Type':'text/plain','X-NetworkDeck':'1'},body:password});
+    const result = await response.json();
+    $('password').value = ''; $('confirmation').value = '';
+    if (result.ok) location.replace('/');
+    else $('message').textContent = result.message;
+  } catch (_) { $('message').textContent = 'The dock did not answer. Try again.'; }
+  $('submit').disabled = false;
+};
+</script></html>

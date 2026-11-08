@@ -22,11 +22,12 @@ add_executable(deck32_tests
   test_session.cpp
   test_hidparse.cpp
   test_deck_ui.cpp
+  test_web_auth.cpp
   ${COMP}/cora/src/frame.cpp
   ${COMP}/cora/src/protocol.cpp
   ${COMP}/cora/src/session.cpp
   ${COMP}/hidparse/src/hid_descriptor.cpp)
-target_include_directories(deck32_tests PRIVATE ${COMP}/cora/include ${COMP}/hidparse/include)
+target_include_directories(deck32_tests PRIVATE ${COMP}/cora/include ${COMP}/hidparse/include ${COMP}/web/include)
 target_compile_options(deck32_tests PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(deck32_tests PRIVATE doctest::doctest deck_ui_core)
 

@@ -6,6 +6,12 @@ adds a line under "Unreleased"; the release that raises `VERSION` renames that s
 
 ## Unreleased
 
+### Added
+- Password-protected web access, with physical approval for first-use setup, expiring browser
+  sessions and sign-out. Status, traces, key images and firmware uploads require sign-in.
+- Firmware uploads reject unauthenticated requests before flash writes, serialize OTA writers,
+  and stop stalled uploads. The web server still uses HTTP: use a trusted, isolated network.
+
 ## [0.1.0] - 2026-11-08
 
 First release: the Waveshare ESP32-P4-NANO works as a Stream Deck Network Dock.

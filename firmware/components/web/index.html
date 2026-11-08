@@ -36,6 +36,7 @@ a{color:var(--accent)}
 <main>
   <h1 id="name">Deck32</h1>
   <p class="sub">Stream Deck Network Dock</p>
+  <button id="logout" class="secondary" type="button">Sign out</button>
 
   <section>
     <h2>Status</h2>
@@ -83,8 +84,20 @@ a{color:var(--accent)}
 </main>
 <script>
 const $ = id => document.getElementById(id);
+const escapeHTML = value => String(value).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 let hotspot = false;
 let loaded = false;
+// Expiry/reboot/login in another browser must take us back to sign-in, not a stale console.
+const nativeFetch = window.fetch.bind(window);
+window.fetch = async (...args) => {
+  const response = await nativeFetch(...args);
+  if (response.status === 401) location.replace('/');
+  return response;
+};
+$('logout').onclick = async () => {
+  await fetch('/api/logout', {method: 'POST', headers: {'X-NetworkDeck': '1'}});
+  location.replace('/');
+};
 
 function say(el, text, kind) { el.textContent = text; el.className = 'msg ' + (kind || ''); }
 function waitText() { return hotspot ? 'Working…' : 'Confirm on the deck: press ✓ (you have 30 seconds).'; }
@@ -104,7 +117,7 @@ async function refresh() {
       ['Serial', s.serial],
       ['Firmware', s.firmware + ' (build ' + s.build + ')'],
     ];
-    $('status').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${String(v).replace(/</g, '&lt;')}</dd>`).join('');
+    $('status').innerHTML = rows.map(([k, v]) => `<dt>${k}</dt><dd>${escapeHTML(v)}</dd>`).join('');
     if (!s.wifi_available) $('wifinote').textContent = 'Wi-Fi is not available on this board.';
     if (!loaded) {
       // Fill the network form once; later refreshes must not overwrite what the user is typing.
@@ -119,7 +132,7 @@ async function refresh() {
 async function post(url, data, msg) {
   say(msg, waitText(), 'wait');
   try {
-    const r = await fetch(url, { method: 'POST', body: new URLSearchParams(data) });
+    const r = await fetch(url, { method: 'POST', headers: {'X-NetworkDeck': '1'}, body: new URLSearchParams(data) });
     const j = await r.json();
     say(msg, j.message, j.ok ? 'ok' : 'bad');
     refresh();
@@ -132,7 +145,7 @@ $('scan').onclick = async () => {
   try {
     const list = await (await fetch('/api/scan')).json();
     $('ssid').innerHTML = '<option value="">Choose a network…</option>' +
-      list.map(n => `<option value="${n.ssid.replace(/"/g, '&quot;')}">${n.ssid.replace(/</g, '&lt;')}${n.secure ? '' : ' (open)'}</option>`).join('');
+      list.map(n => `<option value="${escapeHTML(n.ssid)}">${escapeHTML(n.ssid)}${n.secure ? '' : ' (open)'}</option>`).join('');
     say($('wifimsg'), list.length ? '' : 'No networks found.', list.length ? '' : 'bad');
   } catch (e) { say($('wifimsg'), 'Scan failed.', 'bad'); }
   $('scan').disabled = false;
@@ -156,6 +169,7 @@ $('upload').onclick = () => {
   x.upload.onload = () => say($('fwmsg'), 'Checking the image… ' + waitText(), 'wait');
   x.onload = () => {
     $('upload').disabled = false;
+    if (x.status === 401) { location.replace('/'); return; }
     try { const j = JSON.parse(x.responseText); say($('fwmsg'), j.message, j.ok ? 'ok' : 'bad'); }
     catch (e) { say($('fwmsg'), 'Upload failed.', 'bad'); }
     if (x.status === 200) setTimeout(() => location.reload(), 8000);
@@ -163,6 +177,7 @@ $('upload').onclick = () => {
   x.onerror = () => { $('upload').disabled = false; say($('fwmsg'), 'Upload failed.', 'bad'); };
   x.open('POST', '/api/update');
   x.setRequestHeader('Content-Type', 'application/octet-stream');
+  x.setRequestHeader('X-NetworkDeck', '1');
   x.send(f);
 };
 
