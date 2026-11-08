@@ -13,6 +13,8 @@
 #include "hidparse/hid_descriptor.hpp"
 #include "usb/usb_host.h"
 
+extern "C" volatile uint32_t deck32_intr_out_naks;  // vendor/usb patch 2: NAKed interrupt OUT retries
+
 namespace usb_bridge {
 namespace {
 
@@ -60,6 +62,7 @@ std::atomic<bool> g_out_busy{false};
 std::atomic<int> g_inflight{0};
 std::atomic<uint8_t> g_new_addr{0};
 std::atomic<bool> g_gone{false};
+std::atomic<TickType_t> g_out_since{0};  // when the in-flight OUT transfer was submitted
 
 // ── transfers ──────────────────────────────────────────────────────────────
 
@@ -77,7 +80,19 @@ void in_cb(usb_transfer_t* x) {
 void kick_out();
 
 void out_cb(usb_transfer_t* x) {
-    if (x->status != USB_TRANSFER_STATUS_COMPLETED) ESP_LOGW(TAG, "OUT transfer status %d", x->status);
+    // A lost image packet corrupts that key until the host redraws it, so resend a failed report a
+    // few times. The data is still in the transfer buffer.
+    static int retries = 0;
+    if (x->status == USB_TRANSFER_STATUS_ERROR && g_attached && !g_gone && retries < 3) {
+        ++retries;
+        if (usb_host_transfer_submit(x) == ESP_OK) return;
+    }
+    if (x->status != USB_TRANSFER_STATUS_COMPLETED) {
+        ESP_LOGW(TAG, "OUT transfer status %d after %d retries", x->status, retries);
+    } else if (retries) {
+        ESP_LOGI(TAG, "OUT report resent %d time(s)", retries);
+    }
+    retries = 0;
     --g_inflight;
     g_out_busy = false;
     kick_out();
@@ -95,6 +110,7 @@ void kick_out() {
             std::memcpy(g_dev.xout->data_buffer, msg->data, msg->len);
             g_dev.xout->num_bytes = msg->len;
             ++g_inflight;
+            g_out_since = xTaskGetTickCountFromISR();
             if (usb_host_transfer_submit(g_dev.xout) == ESP_OK) return;
             --g_inflight;
             ESP_LOGW(TAG, "OUT submit failed");
@@ -346,8 +362,25 @@ void client_task(void*) {
     cc.async.callback_arg = nullptr;
     ESP_ERROR_CHECK(usb_host_client_register(&cc, &g_client));
 
+    // A deck plugged in at boot can finish enumerating before we registered, and then no
+    // NEW_DEV event comes: pick up whatever is already there.
+    uint8_t addrs[4];
+    int n = 0;
+    if (usb_host_device_addr_list_fill(sizeof(addrs), addrs, &n) == ESP_OK && n > 0) g_new_addr = addrs[0];
+    ESP_LOGI(TAG, "USB host ready, %d device(s) present", n);
+
+    TickType_t last_check = xTaskGetTickCount();
     for (;;) {
         usb_host_client_handle_events(g_client, pdMS_TO_TICKS(50));
+        if (xTaskGetTickCount() - last_check > pdMS_TO_TICKS(1000)) {
+            last_check = xTaskGetTickCount();
+            if (g_out_busy && last_check - g_out_since > pdMS_TO_TICKS(1000)) {
+                ESP_LOGW(TAG, "OUT transfer in flight for %u ms, %u reports queued",
+                         static_cast<unsigned>(pdTICKS_TO_MS(last_check - g_out_since)),
+                         static_cast<unsigned>(uxQueueMessagesWaiting(g_out_q)));
+            }
+            ESP_LOGD(TAG, "%u OUT NAK retries so far", static_cast<unsigned>(deck32_intr_out_naks));
+        }
         if (g_gone.exchange(false)) {
             // close_device() fires on_detach only if we were attached; DEV_GONE already cleared it.
             if (g_dev.hdl && g_cb.on_detach) g_cb.on_detach();
