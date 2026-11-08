@@ -169,3 +169,21 @@ TEST_CASE("input and feature result frames are verbatim") {
     CHECK(r.message_id == 9);
     CHECK(r.op == HidOp::GetReport);
 }
+
+TEST_CASE("dock port answers the Stream Deck app's Write-form request (03 <id>, 1024 bytes)") {
+    // The official app asks for dock reports as a plain Write, padded to 1024 bytes, message id 0.
+    Session s(Port::Dock, 1, 0);
+    Frame req;
+    req.flags = flags::kNone;
+    req.op = HidOp::Write;
+    req.message_id = 0;
+    req.payload.assign(1024, 0);
+    req.payload[0] = 0x03;
+    req.payload[1] = 0x83;
+    auto out = feed(s, req);
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].kind == Action::Kind::Send);
+    CHECK(out[0].frame.payload[0] == 0x03);
+    CHECK(out[0].frame.payload[1] == 0x83);
+    CHECK(std::string(out[0].frame.payload.begin() + 8, out[0].frame.payload.begin() + 16) == "1.00.000");
+}

@@ -64,6 +64,15 @@ std::vector<uint8_t> dock_report(uint8_t id, const DockIdentity& identity, const
         }
         case report::kDevice2Info:
             return device2_info(child);
+        case report::kClientCount: {
+            // <a> = clients already connected, <b> = 1. The app does not count itself: "01 01" makes it
+            // report "Device is already in use". A second host is refused at accept(), so <a> is 0.
+            auto b = report_header(id);
+            put_u16(b, 2, 2);
+            b[4] = 0x00;
+            b[5] = 0x01;
+            return b;
+        }
         default:
             return {};
     }

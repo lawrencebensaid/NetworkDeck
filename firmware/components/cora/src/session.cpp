@@ -60,8 +60,9 @@ void Session::route(const Frame& f, const DockIdentity& identity, const ChildInf
     const bool verbatim = f.flags & flags::kVerbatim;
 
     if (!verbatim) {
-        // Dock-level requests: `03 <id>`. Both connections answer device 2 info.
-        if (f.op == HidOp::GetReport && f.payload.size() >= 2 && f.payload[0] == 0x03) {
+        // Dock-level requests: `03 <id>`. Both connections answer device 2 info. The open-source client
+        // asks with GetReport; the official Stream Deck app asks with a plain Write (1024 bytes, id 0).
+        if ((f.op == HidOp::GetReport || f.op == HidOp::Write) && f.payload.size() >= 2 && f.payload[0] == 0x03) {
             const uint8_t id = f.payload[1];
             if (port_ == Port::Child && id != report::kDevice2Info) {
                 // The host probes 0x80 on every socket to tell dock from deck. Silence = deck.

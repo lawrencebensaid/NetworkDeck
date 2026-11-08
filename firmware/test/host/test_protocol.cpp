@@ -101,3 +101,17 @@ TEST_CASE("keepalive payload and its ack") {
     ack.flags = flags::kNone;
     CHECK_FALSE(is_keepalive_ack(ack));
 }
+
+TEST_CASE("client count report (03 8f) has length 2 and no other clients") {
+    DockIdentity id;
+    id.serial = "D3E8F60AEB204C";
+    id.firmware = "1.00.000";
+    auto r = dock_report(report::kClientCount, id, ChildInfo{});
+    REQUIRE(r.size() == kReportSize);
+    CHECK(r[0] == 0x03);
+    CHECK(r[1] == 0x8F);
+    CHECK(r[2] == 0x02);
+    CHECK(r[3] == 0x00);
+    CHECK(r[4] == 0x00);
+    CHECK(r[5] == 0x01);
+}
