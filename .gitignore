@@ -4,3 +4,6 @@ sdkconfig.old
 managed_components/
 node_modules/
 .DS_Store
+firmware/build/
+firmware/dependencies.lock
+firmware/test/host/build/
