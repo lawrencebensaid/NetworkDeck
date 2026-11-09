@@ -43,6 +43,7 @@ struct Slot {
 Config g_config;
 std::mutex g_mutex;  // guards g_slot and g_child, and keeps Conns alive while others send on them
 Slot g_slot;
+int64_t g_host_since = 0;  // esp_timer time the current host connected
 cora::ChildInfo g_child;
 std::atomic<uint8_t> g_conn_no{0};
 std::atomic<bool> g_paused{false};
@@ -252,6 +253,7 @@ void listener_task(void* arg) {
                 c = new Conn(fd, port, ip, ++g_conn_no);
                 if (g_slot.dock) shutdown(g_slot.dock->fd, SHUT_RDWR);  // same host reconnecting
                 host_new = g_slot.ip == 0;
+                if (host_new) g_host_since = esp_timer_get_time();
                 g_slot.ip = ip;
                 g_slot.dock = c;
             } else if (port == cora::Port::Child && g_slot.ip == ip && g_child.attached) {
@@ -293,6 +295,15 @@ void start(const Config& config) {
 bool host_connected() {
     std::lock_guard<std::mutex> lock(g_mutex);
     return g_slot.ip != 0;
+}
+
+Host host() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    Host h;
+    if (!g_slot.ip) return h;
+    h.ip = ip_str(g_slot.ip);
+    h.seconds = static_cast<uint32_t>((esp_timer_get_time() - g_host_since) / 1000000);
+    return h;
 }
 
 void deck_attached(const usb_bridge::DeckInfo& info) {

@@ -27,7 +27,7 @@
 namespace {
 
 constexpr char TAG[] = "deck32";
-constexpr char kFirmware[] = "1.00.000";  // what the dock reports to the Stream Deck app
+constexpr char kFirmware[] = "1.01.017";  // what the dock reports to the Stream Deck app (the Elgato dock's latest)
 
 std::string g_name, g_serial;
 QueueHandle_t g_actions = nullptr;  // deck_ui events handled off the deck_ui task (they may prompt)
@@ -65,9 +65,11 @@ void publish_net(const net::Status& s) {
     n.ip4 = to_ui(cfg.ip);
     n.mask = to_ui(cfg.mask);
     n.gateway = to_ui(cfg.gateway);
+    n.wifi_on = s.wifi_enabled;
+    n.wifi_ssid = s.wifi_ssid;
     deck_ui::set_net(n);
     deck_ui::Hotspot h;
-    h.active = s.link == net::Link::Hotspot;
+    h.active = !s.hotspot_ssid.empty();
     h.ssid = s.hotspot_ssid;
     h.password = s.hotspot_password;
     h.url = s.hotspot_ip;
@@ -110,12 +112,23 @@ void actions_task(void*) {
                 apply_network(n);
                 break;
             }
+            case deck_ui::UiEvent::Kind::OpenHotspot:
+            case deck_ui::UiEvent::Kind::CloseHotspot:
+                net::open_hotspot(ev.kind == deck_ui::UiEvent::Kind::OpenHotspot);
+                break;
+            case deck_ui::UiEvent::Kind::SetWifi: {
+                // On the deck itself: no confirmation needed (and the way back if Wi-Fi was turned off).
+                auto w = settings::wifi();
+                w.enabled = ev.yes;
+                settings::set_wifi(w);
+                net::join(w);
+                break;
+            }
             case deck_ui::UiEvent::Kind::FactoryReset:
                 if (ask("Factory reset?")) {
                     settings::factory_reset();
                     vTaskDelay(pdMS_TO_TICKS(300));
-                    // Matter's own storage goes too: it leaves every controller and restarts by itself.
-                    if (matter::status().running && matter::unpair() == ESP_OK) vTaskDelay(pdMS_TO_TICKS(5000));
+                    matter::unpair();  // Matter's own storage goes too, and it leaves every controller
                     esp_restart();
                 }
                 break;
@@ -174,6 +187,10 @@ std::string status_json() {
     j += ",\"dhcp\":" + std::string(cfg.dhcp ? "true" : "false");
     j += ",\"static_ip\":\"" + ip(cfg.ip) + "\",\"static_mask\":\"" + ip(cfg.mask) + "\",\"static_gateway\":\"" + ip(cfg.gateway) + "\"";
     j += ",\"host\":" + std::string(dock_server::host_connected() ? "true" : "false");
+    {
+        const auto h = dock_server::host();
+        j += ",\"host_ip\":\"" + h.ip + "\",\"host_seconds\":" + std::to_string(h.seconds);
+    }
     j += ",\"deck\":\"" + std::string(deck_name) + "\"}";
     return j;
 }
@@ -192,8 +209,8 @@ std::string matter_json() {
 // Leaving every controller restarts the dock: give the web reply a moment to go out first.
 void matter_off_task(void*) {
     vTaskDelay(pdMS_TO_TICKS(500));
-    if (matter::unpair() != ESP_OK) esp_restart();  // not running: nothing to leave, start clean
-    vTaskDelete(nullptr);
+    matter::unpair();
+    esp_restart();
 }
 
 }  // namespace
@@ -311,7 +328,7 @@ extern "C" void app_main(void) {
     };
     hooks.matter_off = [] {
         settings::set_matter_enabled(false);
-        return xTaskCreate(matter_off_task, "matter_off", 4096, nullptr, 5, nullptr) == pdPASS;
+        return xTaskCreate(matter_off_task, "matter_off", 8192, nullptr, 5, nullptr) == pdPASS;
     };
     hooks.set_hostname = [](const std::string& h) {
         settings::set_hostname(h);

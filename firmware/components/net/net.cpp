@@ -27,6 +27,9 @@ namespace {
 constexpr char TAG[] = "net";
 constexpr uint32_t kEthWaitMs = 5000;      // at boot, before falling back to Wi-Fi
 constexpr uint32_t kWifiGiveUpMs = 20000;  // a saved network that won't connect: open the hotspot too
+constexpr uint32_t kRetryMs = 5000;        // after a failed attempt to join, before the next
+constexpr uint32_t kAttemptMs = 20000;     // an attempt with no answer at all counts as failed
+constexpr uint32_t kHotspotOpenMs = 15 * 60 * 1000;  // the setup hotspot asked for on the deck
 
 std::mutex g_mutex;  // guards the state below
 Status g_status;
@@ -47,6 +50,11 @@ bool g_wifi_started = false;
 bool g_ap_on = false;
 bool g_scanning = false;  // a scan asked for Wi-Fi: the policy must not switch it off meanwhile
 uint32_t g_wifi_since = 0;  // when we started trying the saved network
+bool g_sta_wanted = false;  // the station should be joining the saved network
+bool g_sta_started = false; // WIFI_EVENT_STA_START seen: connecting is allowed
+uint32_t g_last_try = 0;    // last esp_wifi_connect(), or when it failed
+bool g_connecting = false;  // an attempt is under way: never start another on top (it aborts it)
+uint32_t g_hotspot_until = 0;  // the hotspot is held open until then (0: not asked for)
 TaskHandle_t g_task = nullptr;
 SemaphoreHandle_t g_scan_done = nullptr;
 
@@ -94,6 +102,16 @@ std::string random_password() {
 
 // ── Wi-Fi ───────────────────────────────────────────────────────────────────
 
+void try_connect() {
+    if (!g_sta_wanted || !g_sta_started || g_sta_connected || g_scanning) return;  // a connect aborts a scan
+    g_last_try = now_ms();
+    g_connecting = true;
+    if (esp_err_t e = esp_wifi_connect(); e != ESP_OK) {
+        ESP_LOGW(TAG, "Wi-Fi connect: %s", esp_err_to_name(e));
+        g_connecting = false;
+    }
+}
+
 bool wifi_init() {
     g_sta_netif = esp_netif_create_default_wifi_sta();
     g_ap_netif = esp_netif_create_default_wifi_ap();
@@ -108,6 +126,14 @@ bool wifi_init() {
         return false;
     }
     esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    // The C5 does 2.4 and 5 GHz: look for the saved network on both (a 5 GHz-only network is
+    // otherwise never found).
+    wifi_band_mode_t band = WIFI_BAND_MODE_2G_ONLY;
+    esp_wifi_get_band_mode(&band);
+    if (band != WIFI_BAND_MODE_AUTO) {
+        err = esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO);
+        ESP_LOGI(TAG, "Wi-Fi bands: was %d, now 2.4 + 5 GHz (%s)", static_cast<int>(band), esp_err_to_name(err));
+    }
     return true;
 }
 
@@ -119,6 +145,9 @@ void wifi_mode(bool sta, bool ap) {
             g_wifi_started = false;
             ESP_LOGI(TAG, "Wi-Fi off");
         }
+        g_sta_wanted = false;
+        g_sta_started = false;
+        g_connecting = false;
         g_ap_on = false;
         g_sta_connected = false;
         g_sta_ip.clear();
@@ -127,13 +156,18 @@ void wifi_mode(bool sta, bool ap) {
     const wifi_mode_t mode = sta && ap ? WIFI_MODE_APSTA : sta ? WIFI_MODE_STA : WIFI_MODE_AP;
     wifi_mode_t cur = WIFI_MODE_NULL;
     esp_wifi_get_mode(&cur);
-    if (g_wifi_started && cur == mode) return;
-    esp_wifi_set_mode(mode);
+    if (g_wifi_started && cur == mode && g_sta_wanted == sta) return;
+    if (esp_err_t e = esp_wifi_set_mode(mode); e != ESP_OK) ESP_LOGW(TAG, "Wi-Fi mode: %s", esp_err_to_name(e));
     if (sta) {
         wifi_config_t sc{};
         std::strncpy(reinterpret_cast<char*>(sc.sta.ssid), g_wifi_cfg.ssid.c_str(), sizeof(sc.sta.ssid) - 1);
         std::strncpy(reinterpret_cast<char*>(sc.sta.password), g_wifi_cfg.password.c_str(), sizeof(sc.sta.password) - 1);
         sc.sta.threshold.authmode = g_wifi_cfg.password.empty() ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
+        // Every channel on both bands, then the strongest access point of the network (the fast scan
+        // stops at the first it hears, which may be a weak one or miss a 5 GHz one).
+        sc.sta.scan_method = WIFI_ALL_CHANNEL_SCAN;
+        sc.sta.sort_method = WIFI_CONNECT_AP_BY_SIGNAL;
+        sc.sta.pmf_cfg.capable = true;
         esp_wifi_set_config(WIFI_IF_STA, &sc);
     }
     if (ap) {
@@ -149,15 +183,24 @@ void wifi_mode(bool sta, bool ap) {
         esp_wifi_set_config(WIFI_IF_AP, &ac);
         g_status.hotspot_ip = "192.168.4.1";
     }
-    if (!g_wifi_started) {
-        esp_wifi_start();
-        g_wifi_started = true;
-    }
+    const bool was_sta = g_sta_wanted;
+    g_sta_wanted = sta;
     g_ap_on = ap;
-    if (sta) {
+    if (sta && !was_sta) {
         apply_to(g_sta_netif, g_cfg);
-        esp_wifi_connect();
         g_wifi_since = now_ms();
+    }
+    if (!g_wifi_started) {
+        // Connecting waits for WIFI_EVENT_STA_START: over esp-hosted the start completes later.
+        g_sta_started = false;
+        g_connecting = false;
+        if (esp_err_t e = esp_wifi_start(); e != ESP_OK) {
+            ESP_LOGE(TAG, "Wi-Fi start: %s", esp_err_to_name(e));
+            return;
+        }
+        g_wifi_started = true;
+    } else if (sta && !was_sta) {
+        try_connect();
     }
     ESP_LOGI(TAG, "Wi-Fi %s%s%s", sta ? "joining '" : "", sta ? (g_wifi_cfg.ssid + "'").c_str() : "",
              ap ? (std::string(sta ? " + " : "") + "hotspot " + g_name).c_str() : "");
@@ -178,14 +221,31 @@ void on_eth_event(void*, esp_event_base_t, int32_t id, void*) {
     wake();
 }
 
-void on_wifi_event(void*, esp_event_base_t, int32_t id, void*) {
+void on_wifi_event(void*, esp_event_base_t, int32_t id, void* data) {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (id == WIFI_EVENT_STA_DISCONNECTED) {
+        const auto* d = static_cast<const wifi_event_sta_disconnected_t*>(data);
+        if (g_sta_wanted)
+            ESP_LOGW(TAG, "Wi-Fi '%s': not joined (reason %u, signal %d dBm)", g_wifi_cfg.ssid.c_str(), d ? d->reason : 0,
+                     d ? d->rssi : 0);
+
         g_sta_connected = false;
+        g_connecting = false;
+        g_last_try = now_ms();
         g_sta_ip.clear();
-        if (g_wifi_started && !g_wifi_cfg.ssid.empty() && !g_eth_link) esp_wifi_connect();  // keep trying
+        // The policy task tries again every few seconds.
+    } else if (id == WIFI_EVENT_STA_START) {
+        g_sta_started = true;
+        g_last_try = now_ms() - kRetryMs;  // the policy task connects at once (not here: a small stack)
+    } else if (id == WIFI_EVENT_STA_STOP) {
+        g_sta_started = false;
+        g_connecting = false;
+    } else if (id == WIFI_EVENT_AP_START) {
+        ESP_LOGI(TAG, "hotspot %s is up", g_name.c_str());
+        // In AP-only mode there is no STA_START: nothing to connect.
     } else if (id == WIFI_EVENT_STA_CONNECTED) {
         g_sta_connected = true;
+        g_connecting = false;
         ESP_LOGI(TAG, "Wi-Fi joined '%s'", g_wifi_cfg.ssid.c_str());
     } else if (id == WIFI_EVENT_SCAN_DONE) {
         if (g_scan_done) xSemaphoreGive(g_scan_done);
@@ -228,19 +288,27 @@ void policy_locked(uint32_t boot) {
     const uint32_t t = now_ms();
     if (g_scanning) {
         // leave Wi-Fi as it is until the scan is done
-    } else if (!g_wifi_cfg.enabled || g_eth_link) {
+    } else if (!g_wifi_cfg.enabled) {
         wifi_mode(false, false);
-    } else if (t - boot >= kEthWaitMs) {
+    } else {
+        if (g_hotspot_until && static_cast<int32_t>(t - g_hotspot_until) >= 0) g_hotspot_until = 0;
+        const bool asked = g_hotspot_until != 0;  // opened on the deck: also while Ethernet is up
         const bool have_wifi = !g_wifi_cfg.ssid.empty();
         const bool sta_ok = g_sta_connected && !g_sta_ip.empty();
-        // Hotspot when there's nothing to join, or the saved network hasn't worked for a while.
-        const bool ap = !have_wifi || (!sta_ok && g_wifi_started && t - g_wifi_since >= kWifiGiveUpMs) ||
-                        (g_ap_on && !sta_ok);
-        wifi_mode(have_wifi, ap);
+        if (g_eth_link) {
+            wifi_mode(asked && have_wifi, asked);
+        } else if (t - boot >= kEthWaitMs || asked) {
+            // Hotspot when there's nothing to join, or the saved network hasn't worked for a while.
+            const bool ap = asked || !have_wifi || (!sta_ok && g_sta_wanted && t - g_wifi_since >= kWifiGiveUpMs) ||
+                            (g_ap_on && !sta_ok);
+            wifi_mode(have_wifi, ap);
+        }
+        if (g_sta_wanted && g_sta_started && !g_sta_connected && t - g_last_try >= (g_connecting ? kAttemptMs : kRetryMs))
+            try_connect();
     }
 
     Status s = g_status;
-    if (g_eth_link) {
+    if (g_eth_link && !g_eth_ip.empty()) {
         s.link = Link::Ethernet;
         s.ip = g_eth_ip;
     } else if (g_sta_connected && !g_sta_ip.empty()) {
@@ -249,6 +317,9 @@ void policy_locked(uint32_t boot) {
     } else if (g_ap_on) {
         s.link = Link::Hotspot;
         s.ip = g_status.hotspot_ip;
+    } else if (g_eth_link) {
+        s.link = Link::Ethernet;  // link up, still waiting for an address
+        s.ip.clear();
     } else {
         s.link = Link::None;
         s.ip.clear();
@@ -370,9 +441,19 @@ void join(const settings::Wifi& w) {
         esp_wifi_disconnect();
         esp_wifi_stop();
         g_wifi_started = false;
+        g_sta_wanted = false;
+        g_sta_started = false;
+        g_connecting = false;
         g_sta_connected = false;
         g_sta_ip.clear();
+        g_ap_on = false;
     }
+    wake();
+}
+
+void open_hotspot(bool open) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_hotspot_until = open ? (now_ms() + kHotspotOpenMs) | 1u : 0;
     wake();
 }
 

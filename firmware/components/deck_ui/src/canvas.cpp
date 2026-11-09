@@ -4,6 +4,8 @@
 #include <cmath>
 
 extern "C" {
+#include <vector>
+
 #include "qrcodegen.h"
 }
 
@@ -127,7 +129,10 @@ const Font& Canvas::fit(const std::string& s, int max_w) {
 }
 
 bool Canvas::qr(const std::string& s, int x, int y, int size) {
-    uint8_t qr[qrcodegen_BUFFER_LEN_MAX], tmp[qrcodegen_BUFFER_LEN_MAX];
+    // On the heap: the two buffers are almost 8 KB, more than a drawing task's stack can spare.
+    std::vector<uint8_t> buf(2 * qrcodegen_BUFFER_LEN_MAX);
+    uint8_t* qr = buf.data();
+    uint8_t* tmp = qr + qrcodegen_BUFFER_LEN_MAX;
     if (!qrcodegen_encodeText(s.c_str(), tmp, qr, qrcodegen_Ecc_LOW, qrcodegen_VERSION_MIN, qrcodegen_VERSION_MAX,
                               qrcodegen_Mask_AUTO, true))
         return false;

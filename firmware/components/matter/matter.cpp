@@ -191,6 +191,15 @@ void make_codes() {
     if (chip::ManualSetupPayloadGenerator(p).payloadDecimalStringRepresentation(g_manual) != CHIP_NO_ERROR) g_manual.clear();
 }
 
+// The stack lock, waiting at most `ms`: callers are web requests, which must not hang on a busy stack.
+bool lock_stack(uint32_t ms) {
+    for (uint32_t waited = 0;; waited += 10) {
+        if (PlatformMgr().TryLockChipStack()) return true;
+        if (waited >= ms) return false;
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
 void copy(char* dst, size_t size, const std::string& s) {
     std::strncpy(dst, s.c_str(), size - 1);
     dst[size - 1] = '\0';
@@ -284,20 +293,23 @@ Status status() {
     s.qr = g_qr;
     s.manual = g_manual;
     if (!g_running) return s;
-    lock::ScopedChipStackLock lock(portMAX_DELAY);
+    if (!lock_stack(500)) return s;
     auto& server = chip::Server::GetInstance();
     s.fabrics = server.GetFabricTable().FabricCount();
     s.window_open = server.GetCommissioningWindowManager().IsCommissioningWindowOpen();
     s.window_seconds = kWindowSeconds;
+    PlatformMgr().UnlockChipStack();
     return s;
 }
 
 esp_err_t open_window() {
     if (!g_running) return ESP_ERR_INVALID_STATE;
-    lock::ScopedChipStackLock lock(portMAX_DELAY);
+    if (!lock_stack(2000)) return ESP_ERR_TIMEOUT;
     auto& windows = chip::Server::GetInstance().GetCommissioningWindowManager();
-    if (windows.IsCommissioningWindowOpen()) return ESP_OK;
-    return windows.OpenBasicCommissioningWindow(chip::System::Clock::Seconds32(kWindowSeconds)) == CHIP_NO_ERROR ? ESP_OK : ESP_FAIL;
+    const bool ok = windows.IsCommissioningWindowOpen() ||
+                    windows.OpenBasicCommissioningWindow(chip::System::Clock::Seconds32(kWindowSeconds)) == CHIP_NO_ERROR;
+    PlatformMgr().UnlockChipStack();
+    return ok ? ESP_OK : ESP_FAIL;
 }
 
 bool has_setup_code() {
@@ -309,15 +321,31 @@ bool has_setup_code() {
     return have;
 }
 
-esp_err_t unpair() {
+void erase_namespace(const char* ns) {
     nvs_handle_t h;
-    if (nvs_open(kNvsNamespace, NVS_READWRITE, &h) == ESP_OK) {  // a new code the next time it is set up
-        nvs_erase_all(h);
-        nvs_commit(h);
-        nvs_close(h);
+    if (nvs_open(ns, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_erase_all(h);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+esp_err_t unpair() {
+    erase_namespace(kNvsNamespace);  // a new code the next time it is set up
+    if (g_running) {
+        // Tell the controllers the dock is leaving, if the stack answers. Not through the SDK's
+        // factory reset: that goes through the stack's own task and can stall there.
+        if (lock_stack(3000)) {
+            chip::Server::GetInstance().GetFabricTable().DeleteAllFabrics();
+            PlatformMgr().UnlockChipStack();
+            vTaskDelay(pdMS_TO_TICKS(1000));  // the Leave events go out
+        } else {
+            ESP_LOGW(TAG, "stack busy: leaving without telling the controllers");
+        }
     }
-    if (!g_running) return ESP_ERR_INVALID_STATE;
-    return esp_matter::factory_reset();  // Matter's own storage only; restarts
+    // Everything Matter keeps: the data model, the stack's config, counters and fabrics.
+    for (const char* ns : {"esp_matter_kvs", "chip-config", "chip-counters", "CHIP_KVS"}) erase_namespace(ns);
+    ESP_LOGI(TAG, "Matter storage erased");
+    return ESP_OK;
 }
 
 }  // namespace matter

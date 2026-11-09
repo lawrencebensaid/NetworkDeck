@@ -113,6 +113,30 @@ void icon_cancel(Canvas& c) {
     c.line(w * 0.65f, w * 0.35f, w * 0.35f, w * 0.65f, w * 0.08f, color::kWhite);
 }
 
+// A control: a grey key with a title and, under it, what it does.
+void button(Canvas& c, const std::string& title, const std::string& sub, Rgb bg = color::kPanel) {
+    const int w = c.width();
+    c.round_rect(0, 0, w, w, w / 7, bg);
+    const Font& f = Canvas::text_width(kMediumFont, title) <= w - 8 ? kMediumFont : kSmallFont;
+    if (sub.empty()) return centered_lines(c, {title}, f, 0, w, color::kWhite);
+    const int y = w / 2 - f.line_height() + 2;
+    c.text_centered(f, w / 2, y, title, color::kWhite);
+    auto lines = wrap(sub, kSmallFont, w - 8);
+    int ly = y + f.line_height() + 2;
+    for (const auto& l : lines) {
+        c.text_centered(kSmallFont, w / 2, ly, l, bg == color::kPanel ? color::kLabel : color::kWhite);
+        ly += kSmallFont.line_height();
+    }
+}
+
+void icon_back(Canvas& c) {
+    const float w = static_cast<float>(c.width());
+    c.round_rect(0, 0, c.width(), c.width(), c.width() / 7, color::kPanel);
+    c.line(w * 0.56f, w * 0.24f, w * 0.40f, w * 0.40f, w * 0.06f, color::kWhite);
+    c.line(w * 0.40f, w * 0.40f, w * 0.56f, w * 0.56f, w * 0.06f, color::kWhite);
+    c.text_centered(kSmallFont, c.width() / 2, static_cast<int>(w * 0.66f), "Back", color::kLabel);
+}
+
 }  // namespace
 
 std::pair<std::string, std::string> ip_parts(const std::string& ip) {
@@ -136,7 +160,14 @@ void Ui::set_net(const NetInfo& n) {
 }
 
 void Ui::set_hotspot(const Hotspot& h) {
+    // The dock has no other network and opened the hotspot itself: show how to set up Wi-Fi.
+    if (h.active && !hotspot_.active && net_.link == "Hotspot" && page_ == Page::Network) page_ = Page::Wifi;
     hotspot_ = h;
+    touch();
+}
+
+void Ui::go(Page p) {
+    page_ = p;
     touch();
 }
 
@@ -160,6 +191,7 @@ Ip4& Ui::field() { return edit_[field_]; }
 
 // The static editor, pre-filled with the stored static settings and the current address if there is one.
 void Ui::open_editor() {
+    editor_back_ = page_;
     edit_[0] = net_.ip4;
     edit_[1] = net_.mask;
     edit_[2] = net_.gateway;
@@ -182,15 +214,30 @@ Ui::Slot Ui::slot(int key) const {
         if (big) return key == 10 ? Slot{Role::Cancel} : key == 14 ? Slot{Role::Ok} : Slot{};
         return key == 3 ? Slot{Role::Cancel} : key == 5 ? Slot{Role::Ok} : Slot{};
     }
-    if (hotspot_.active) return {};
-    if (page_ == Page::Network) {
-        // As on the Elgato dock: IP over the first row's first three keys, then Firmware, Mode and
-        // Setup under them.
-        static const Role kRow0[] = {Role::IpLabel, Role::IpHead, Role::IpTail};
-        static const Role kRow1[] = {Role::Firmware, Role::Mode, Role::Setup};
-        if (key < 3) return {kRow0[key]};
-        if (key >= m_.cols && key < m_.cols + 3) return {kRow1[key - m_.cols]};
+    // Every page fits the Mini: three keys wide, two rows. Larger decks add to the right.
+    const int col = key % m_.cols, row = key / m_.cols;
+    auto grid = [&](const Role (&r0)[3], const Role (&r1)[3]) -> Slot {
+        if (col < 3 && row == 0) return {r0[col]};
+        if (col < 3 && row == 1) return {r1[col]};
         return {};
+    };
+    switch (page_) {
+        case Page::Network:
+            // As on the Elgato dock: IP over the first row's first three keys, then Firmware, Mode
+            // and Setup under them.
+            return grid({Role::IpLabel, Role::IpHead, Role::IpTail}, {Role::Firmware, Role::Mode, Role::Setup});
+        case Page::Setup:
+            return grid({Role::Back, Role::PickEthernet, Role::PickWifi}, {Role::Blank, Role::EthStatus, Role::WifiStatus});
+        case Page::Ethernet:
+            return grid({Role::Back, Role::Mode, Role::StaticIp}, {Role::Blank, Role::EthStatus, Role::Address});
+        case Page::Wifi:
+            // The Mini has no fourth column: the address takes the saved network's key while the
+            // hotspot is up.
+            if (big && key == at(1, 3)) return {Role::HotspotUrl};
+            return grid({Role::Back, Role::WifiToggle, !big && hotspot_.active ? Role::HotspotUrl : Role::SavedNetwork},
+                        {Role::Qr, Role::HotspotName, Role::HotspotPassword});
+        case Page::Editor:
+            break;
     }
     if (big) {
         if (key == 0) return {Role::Field};
@@ -225,8 +272,26 @@ UiEvent Ui::press(const Slot& s, uint32_t now) {
             touch();
             break;
         case Role::Setup:
+            go(Page::Setup);
+            break;
+        case Role::Back:
+            if (page_ == Page::Wifi) ev.kind = UiEvent::Kind::CloseHotspot;
+            go(page_ == Page::Setup ? Page::Network : Page::Setup);
+            break;
+        case Role::PickEthernet:
+            go(Page::Ethernet);
+            break;
+        case Role::PickWifi:
+            go(Page::Wifi);
+            ev.kind = UiEvent::Kind::OpenHotspot;
+            break;
+        case Role::StaticIp:
             open_editor();
             touch();
+            break;
+        case Role::WifiToggle:
+            ev.kind = UiEvent::Kind::SetWifi;
+            ev.yes = !net_.wifi_on;
             break;
         case Role::Octet:
             octet_ = m_.cols >= 5 ? s.arg : (octet_ + 1) % 4;
@@ -246,12 +311,12 @@ UiEvent Ui::press(const Slot& s, uint32_t now) {
                 ev.ip = edit_[0];
                 ev.mask = edit_[1];
                 ev.gateway = edit_[2];
-                page_ = Page::Network;
+                page_ = editor_back_;
             }
             touch();
             break;
         case Role::Cancel:
-            page_ = Page::Network;
+            page_ = editor_back_;
             touch();
             break;
         default:
@@ -331,17 +396,6 @@ void Ui::render(int key, Canvas& c) const {
         return;
     }
 
-    if (hotspot_.active) {
-        if (key == 0) {
-            c.qr("WIFI:T:WPA;S:" + hotspot_.ssid + ";P:" + hotspot_.password + ";;", 0, 0, k);
-            return;
-        }
-        if (key == 1) return label_value(c, "Wi-Fi", hotspot_.ssid, color::kWhite);
-        if (key == 2) return label_value(c, "Password", hotspot_.password, color::kWhite);
-        if (key == (big ? 3 : 3)) return label_value(c, "Then open", hotspot_.url, color::kWhite);
-        return;
-    }
-
     const Slot s = slot(key);
     switch (s.role) {
         case Role::IpLabel:
@@ -357,7 +411,9 @@ void Ui::render(int key, Canvas& c) const {
             break;
         }
         case Role::Firmware:
-            centered_lines(c, {"Firmware", net_.firmware}, kMonoFont, 0, k, color::kWhite);
+            // Top-aligned, as on the Elgato dock.
+            c.text_centered(kMonoFont, k / 2, k / 8, "Firmware", color::kWhite);
+            c.text_centered(kMonoFont, k / 2, k / 8 + kMonoFont.line_height() + 2, net_.firmware, color::kWhite);
             break;
         case Role::Mode: {
             // A lit key: the whole face blue, the mode on it.
@@ -367,15 +423,57 @@ void Ui::render(int key, Canvas& c) const {
             centered_lines(c, {"Mode:", t}, f, 0, k, color::kWhite);
             break;
         }
-        case Role::Setup: {
-            // A button: the word, and a bar under it.
-            const Font& f = kLargeFont;
-            const int y = (k - f.line_height()) / 2 - 2;
-            c.text_centered(f, k / 2, y, "Setup", color::kWhite);
-            const int bar = k / 3;
-            c.round_rect((k - bar) / 2, y + f.line_height() + k / 12, bar, std::max(2, k / 32), 1, color::kLabel);
+        case Role::Setup:
+            centered_lines(c, {"Setup"}, kLargeFont, 0, k, color::kWhite);
+            break;
+        case Role::Back:
+            icon_back(c);
+            break;
+        case Role::PickEthernet:
+            button(c, "Ethernet", "IP address");
+            break;
+        case Role::PickWifi:
+            button(c, "Wi-Fi", "Join a network");
+            break;
+        case Role::EthStatus: {
+            const bool cable = net_.link == "Ethernet";
+            label_value(c, "Ethernet", cable ? "Connected" : "No cable", cable ? color::kGreen : color::kLabel);
             break;
         }
+        case Role::WifiStatus: {
+            const bool on_wifi = net_.link == "Wi-Fi";
+            const std::string v = !net_.wifi_on ? "Off" : net_.wifi_ssid.empty() ? "Not set up" : net_.wifi_ssid;
+            label_value(c, on_wifi ? "Wi-Fi joined" : "Wi-Fi", v, on_wifi ? color::kGreen : color::kWhite);
+            break;
+        }
+        case Role::StaticIp:
+            button(c, "Static IP", net_.dhcp ? "Set an address" : "Change it");
+            break;
+        case Role::Address:
+            if (net_.link == "Ethernet") label_value(c, "Address", net_.ip.empty() ? "Waiting" : net_.ip, color::kWhite);
+            break;
+        case Role::WifiToggle:
+            button(c, net_.wifi_on ? "Wi-Fi On" : "Wi-Fi Off", net_.wifi_on ? "Press to turn off" : "Press to turn on",
+                   net_.wifi_on ? kModeKey : color::kPanel);
+            break;
+        case Role::SavedNetwork:
+            label_value(c, net_.link == "Wi-Fi" ? "Joined" : "Saved", net_.wifi_ssid.empty() ? "None" : net_.wifi_ssid,
+                        net_.link == "Wi-Fi" ? color::kGreen : color::kWhite);
+            break;
+        case Role::Qr:
+            if (hotspot_.active) c.qr("WIFI:T:WPA;S:" + hotspot_.ssid + ";P:" + hotspot_.password + ";;", 0, 0, k);
+            break;
+        case Role::HotspotName:
+            if (hotspot_.active) label_value(c, "1. Join", hotspot_.ssid, color::kWhite);
+            else if (!net_.wifi_on) centered_lines(c, wrap("Turn Wi-Fi on first", kSmallFont, k - 8), kSmallFont, 0, k, color::kLabel);
+            else centered_lines(c, {"Starting", "hotspot..."}, kSmallFont, 0, k, color::kLabel);
+            break;
+        case Role::HotspotPassword:
+            if (hotspot_.active) label_value(c, "Password", hotspot_.password, color::kWhite);
+            break;
+        case Role::HotspotUrl:
+            if (hotspot_.active) label_value(c, "2. Open", hotspot_.url, color::kWhite);
+            break;
         case Role::Field: {
             static const char* kNames[] = {"IP", "Mask", "Gateway"};
             c.text_centered(kSmallFont, k / 2, 8, "Static", color::kLabel);

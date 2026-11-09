@@ -42,6 +42,9 @@ void apply(const settings::Network& n);
 // Join this network now (the caller has stored it).
 void join(const settings::Wifi& w);
 std::vector<ScanResult> scan();
+// Holds the setup hotspot open for 15 minutes, also while Ethernet is up (asked for on the deck);
+// false closes it again (unless the dock has no other network).
+void open_hotspot(bool open);
 
 // Ethernet MAC (also the dock's identity: serial and mDNS name derive from it).
 std::array<uint8_t, 6> mac();

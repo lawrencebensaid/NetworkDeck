@@ -8,6 +8,7 @@ import { EthernetPort, RadioTower, Unplug, Wifi, WifiOff } from "@lucide/vue"
 import { computed, ref, type Component } from "vue"
 
 import DeckIcon from "../components/DeckIcon.vue"
+import { hardware } from "./models.ts"
 import { store } from "./store.ts"
 
 export type Tone = "on" | "attention" | "error" | "busy" | "off"
@@ -65,9 +66,12 @@ export function useLights() {
     if (!d) return { ...base, tone: "off", state: "Checking", tip: "Asking the dock about its deck." }
     if (!d.attached)
       return { ...base, icon: Unplug, tone: "off", state: "Not plugged in", tip: "Plug a Stream Deck into the dock's USB-A port." }
-    if (store.status?.host)
-      return { ...base, tone: "on", state: "Stream Deck app", tip: `${d.model}: the Stream Deck app draws the keys.` }
-    return { ...base, tone: "busy", state: "Dock screens", tip: `${d.model}: no Stream Deck app is connected, so it shows the dock's own screens.` }
+    const model = d.model ?? hardware(d.pid).name
+    if (store.status?.host) {
+      const from = store.status.host_ip ? ` on ${store.status.host_ip}` : ""
+      return { ...base, tone: "on", state: "Stream Deck app", tip: `${model}: the Stream Deck app${from} draws the keys.` }
+    }
+    return { ...base, tone: "busy", state: "Dock screens", tip: `${model}: no Stream Deck app is connected, so it shows the dock's own screens.` }
   })
 
   const network = computed<Light>(() => {
