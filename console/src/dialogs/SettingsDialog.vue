@@ -29,10 +29,10 @@ interface Section {
 const sections = computed<Section[]>(() => [
   { id: "network", title: "Network", blurb: "How the dock gets its address on your network.", view: NetworkPanel },
   ...(store.status?.wifi_available
-    ? [{ id: "wifi", title: "Wi-Fi", blurb: "Used when no Ethernet cable is connected.", view: WifiPanel }]
+    ? [{ id: "wifi", title: "Wi-Fi", blurb: "The dock's wireless network.", view: WifiPanel }]
     : []),
   { id: "firmware", title: "Firmware", blurb: "What runs on the dock, and installing an update.", view: FirmwarePanel },
-  { id: "password", title: "Password", blurb: "The password of this web interface.", view: SecurityPanel },
+  { id: "users", title: "Users", blurb: "Who signs in to this web interface, and how.", view: SecurityPanel },
 ])
 const extra: Section[] = [{ id: "about", title: "About", blurb: "What the dock says of itself.", view: AboutPanel }]
 
@@ -54,7 +54,7 @@ const navClass = (id: string) =>
     >
       <header class="flex h-12 shrink-0 items-center justify-between gap-3 border-b bg-card px-4">
         <DialogTitle class="text-sm font-semibold">Settings</DialogTitle>
-        <DialogDescription class="sr-only">The dock's network, Wi-Fi, firmware and password.</DialogDescription>
+        <DialogDescription class="sr-only">The dock's network, Wi-Fi, firmware and users.</DialogDescription>
         <DialogClose as-child>
           <Button type="button" variant="ghost" size="icon-sm" aria-label="Close settings"><X /></Button>
         </DialogClose>

@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <utility>
 
 #include "deck_ui/canvas.hpp"
 #include "deck_ui/model.hpp"
@@ -58,7 +59,7 @@ public:
 
 private:
     enum class Page { Network, Editor };
-    enum class Role { Blank, Ip, Link, Firmware, Mode, Field, Octet, Up, Down, Ok, Cancel };
+    enum class Role { Blank, IpLabel, IpHead, IpTail, Firmware, Mode, Setup, Field, Octet, Up, Down, Ok, Cancel };
     struct Slot {
         Role role = Role::Blank;
         int arg = 0;  // octet index for Role::Octet
@@ -69,6 +70,7 @@ private:
     Ip4& field();
     void step(int delta);
     UiEvent press(const Slot& s, uint32_t now);
+    void open_editor();
 
     const Model& m_;
     NetInfo net_;
@@ -92,5 +94,9 @@ private:
 };
 
 std::string ip_to_string(const Ip4& ip);
+
+// An address over two keys, as the Elgato dock shows it: "10.0." and "1.187" (split after the second
+// dot). Both empty for an empty address.
+std::pair<std::string, std::string> ip_parts(const std::string& ip);
 
 }  // namespace deck_ui

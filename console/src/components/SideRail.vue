@@ -6,7 +6,7 @@
  * account.
  * On a phone it runs along the bottom.
  */
-import { Activity, CircleUser, Grid3x3, House, KeyRound, LogOut, Plug, Settings } from "@lucide/vue"
+import { Activity, CircleUser, House, KeyRound, LogOut, Plug, Settings } from "@lucide/vue"
 
 import {
   DropdownMenu,
@@ -18,13 +18,14 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { PANELS, type PanelId } from "../panels/panels.ts"
 import { signOut, store } from "../session/store.ts"
+import DeckIcon from "./DeckIcon.vue"
 import RailButton from "./RailButton.vue"
 import TipWrap from "./TipWrap.vue"
 
 defineProps<{ panel: PanelId | null }>()
 defineEmits<{ panel: [id: PanelId]; settings: [section?: string]; integrations: [] }>()
 
-const icons = { deck: Grid3x3, matter: House, diagnostics: Activity }
+const icons = { deck: DeckIcon, matter: House, diagnostics: Activity }
 const order: PanelId[] = ["deck", "matter", "diagnostics"]
 </script>
 
@@ -72,7 +73,7 @@ const order: PanelId[] = ["deck", "matter", "diagnostics"]
             <span class="text-xs text-muted-foreground">{{ store.viaHotspot ? "Signed in over the hotspot" : "Signed in with the dock's password" }}</span>
           </DropdownMenuLabel>
           <DropdownMenuSeparator />
-          <DropdownMenuItem @select="$emit('settings', 'password')"><KeyRound /> Change password</DropdownMenuItem>
+          <DropdownMenuItem @select="$emit('settings', 'users')"><KeyRound /> Change password</DropdownMenuItem>
           <DropdownMenuItem data-testid="sign-out" @select="signOut"><LogOut /> Sign out</DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>

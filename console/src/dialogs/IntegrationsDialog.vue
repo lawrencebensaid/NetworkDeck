@@ -51,7 +51,7 @@ interface Integration {
 const integrations = computed<Integration[]>(() => {
   const m = matter.value
   const n = m?.fabrics ?? 0
-  const matterState = !m ? "…" : !m.running ? "Off" : n > 0 ? (n === 1 ? "1 controller" : `${n} controllers`) : m.window_open ? "Ready to pair" : "Not paired"
+  const matterState = !m ? "…" : !m.running ? (m.enabled ? "Did not start" : "Off") : n > 0 ? (n === 1 ? "1 controller" : `${n} controllers`) : m.window_open ? "Ready to pair" : "Not paired"
   return [
     { id: "matter", name: "Matter", icon: House, state: matterState },
     { id: "rest", name: "REST API", icon: Webhook, state: "Planned", later: true },

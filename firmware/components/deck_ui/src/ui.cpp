@@ -9,6 +9,7 @@ namespace {
 
 constexpr uint32_t kRepeatDelayMs = 400;
 constexpr uint32_t kRepeatEveryMs = 60;
+constexpr Rgb kModeKey{76, 60, 236};  // the Elgato dock's lit Mode key, a violet blue
 
 bool parse_ip(const std::string& s, Ip4& out) {
     unsigned a, b, c, d;
@@ -114,6 +115,13 @@ void icon_cancel(Canvas& c) {
 
 }  // namespace
 
+std::pair<std::string, std::string> ip_parts(const std::string& ip) {
+    const size_t first = ip.find('.');
+    const size_t second = first == std::string::npos ? first : ip.find('.', first + 1);
+    if (second == std::string::npos) return {ip, ""};
+    return {ip.substr(0, second + 1), ip.substr(second + 1)};
+}
+
 std::string ip_to_string(const Ip4& ip) {
     char b[16];
     std::snprintf(b, sizeof(b), "%u.%u.%u.%u", ip[0], ip[1], ip[2], ip[3]);
@@ -150,6 +158,18 @@ void Ui::cancel_prompt(uint32_t id) {
 
 Ip4& Ui::field() { return edit_[field_]; }
 
+// The static editor, pre-filled with the stored static settings and the current address if there is one.
+void Ui::open_editor() {
+    edit_[0] = net_.ip4;
+    edit_[1] = net_.mask;
+    edit_[2] = net_.gateway;
+    Ip4 now_ip;
+    if (parse_ip(net_.ip, now_ip)) edit_[0] = now_ip;
+    page_ = Page::Editor;
+    field_ = 0;
+    octet_ = 0;
+}
+
 void Ui::step(int delta) {
     uint8_t& o = field()[octet_];
     o = static_cast<uint8_t>((o + delta + 256) % 256);
@@ -164,10 +184,13 @@ Ui::Slot Ui::slot(int key) const {
     }
     if (hotspot_.active) return {};
     if (page_ == Page::Network) {
-        static const Role kBig[] = {Role::Ip, Role::Link, Role::Firmware, Role::Mode};
-        static const Role kMini[] = {Role::Ip, Role::Link, Role::Mode, Role::Firmware};
-        const Role* roles = big ? kBig : kMini;
-        return key < 4 ? Slot{roles[key]} : Slot{};
+        // As on the Elgato dock: IP over the first row's first three keys, then Firmware, Mode and
+        // Setup under them.
+        static const Role kRow0[] = {Role::IpLabel, Role::IpHead, Role::IpTail};
+        static const Role kRow1[] = {Role::Firmware, Role::Mode, Role::Setup};
+        if (key < 3) return {kRow0[key]};
+        if (key >= m_.cols && key < m_.cols + 3) return {kRow1[key - m_.cols]};
+        return {};
     }
     if (big) {
         if (key == 0) return {Role::Field};
@@ -196,19 +219,13 @@ UiEvent Ui::press(const Slot& s, uint32_t now) {
     }
     switch (s.role) {
         case Role::Mode:
-            if (net_.dhcp) {
-                // Start the static editor, pre-filled with the current address when there is one.
-                edit_[0] = net_.ip4;
-                edit_[1] = net_.mask;
-                edit_[2] = net_.gateway;
-                Ip4 now_ip;
-                if (parse_ip(net_.ip, now_ip)) edit_[0] = now_ip;
-                page_ = Page::Editor;
-                field_ = 0;
-                octet_ = 0;
-            } else {
-                ev.kind = UiEvent::Kind::SetDhcp;
-            }
+            // DHCP -> static needs an address: the editor. Static -> DHCP at once.
+            if (net_.dhcp) open_editor();
+            else ev.kind = UiEvent::Kind::SetDhcp;
+            touch();
+            break;
+        case Role::Setup:
+            open_editor();
             touch();
             break;
         case Role::Octet:
@@ -327,25 +344,38 @@ void Ui::render(int key, Canvas& c) const {
 
     const Slot s = slot(key);
     switch (s.role) {
-        case Role::Ip:
-            label_value(c, "IP Address", net_.ip.empty() ? "-" : net_.ip, color::kWhite);
+        case Role::IpLabel:
+            centered_lines(c, {"IP"}, kMonoFont, 0, k, color::kWhite);
             break;
-        case Role::Link:
-            label_value(c, "Network", net_.link, color::kWhite);
+        case Role::IpHead:
+        case Role::IpTail: {
+            // "GETTING" "..." until there is an address, as the Elgato dock does.
+            const auto parts = ip_parts(net_.ip);
+            const std::string t = net_.ip.empty() ? (s.role == Role::IpHead ? "GETTING" : "...")
+                                                  : (s.role == Role::IpHead ? parts.first : parts.second);
+            centered_lines(c, {t}, kMonoFont, 0, k, color::kWhite);
             break;
+        }
         case Role::Firmware:
-            label_value(c, "Firmware", net_.firmware, color::kWhite);
+            centered_lines(c, {"Firmware", net_.firmware}, kMonoFont, 0, k, color::kWhite);
             break;
-        case Role::Mode:
-            c.text_centered(kSmallFont, k / 2, 4, "Mode", color::kLabel);
-            {
-                const int pad = k / 8;
-                c.round_rect(pad, k / 3, k - 2 * pad, k / 2, k / 8, net_.dhcp ? color::kBlue : color::kOrange);
-                const std::string t = net_.dhcp ? "DHCP" : "Static";
-                const Font& f = Canvas::fit(t, k - 4 * pad);
-                c.text_centered(f, k / 2, k / 3 + (k / 2 - f.line_height()) / 2, t, color::kWhite);
-            }
+        case Role::Mode: {
+            // A lit key: the whole face blue, the mode on it.
+            c.round_rect(0, 0, k, k, k / 7, kModeKey);
+            const std::string t = net_.dhcp ? "DHCP" : "Static";
+            const Font& f = Canvas::text_width(kLargeFont, t) <= k - 8 ? kLargeFont : kMediumFont;
+            centered_lines(c, {"Mode:", t}, f, 0, k, color::kWhite);
             break;
+        }
+        case Role::Setup: {
+            // A button: the word, and a bar under it.
+            const Font& f = kLargeFont;
+            const int y = (k - f.line_height()) / 2 - 2;
+            c.text_centered(f, k / 2, y, "Setup", color::kWhite);
+            const int bar = k / 3;
+            c.round_rect((k - bar) / 2, y + f.line_height() + k / 12, bar, std::max(2, k / 32), 1, color::kLabel);
+            break;
+        }
         case Role::Field: {
             static const char* kNames[] = {"IP", "Mask", "Gateway"};
             c.text_centered(kSmallFont, k / 2, 8, "Static", color::kLabel);

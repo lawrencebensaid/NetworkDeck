@@ -1,8 +1,8 @@
 <script setup lang="ts">
 /*
  * The Stream Deck on the dock's USB port: what it is, who draws on it now, and what the dock does with
- * it. The brightness is that of the dock's own screens; the Stream Deck app sets its own while it is
- * connected.
+ * it. The screen brightness is the deck's while it shows the dock's own screens; the Stream Deck app
+ * sets its own while it is connected.
  */
 import { computed, ref, watch } from "vue"
 import { Usb } from "@lucide/vue"
@@ -61,7 +61,7 @@ async function commit() {
 
     <div class="flex flex-col gap-2 border-t pt-5">
       <div class="flex items-baseline justify-between">
-        <Label for="bright">Brightness of the dock's screens</Label>
+        <Label for="bright">Screen brightness</Label>
         <span class="text-sm tabular-nums text-muted-foreground">{{ brightness }}%</span>
       </div>
       <input
@@ -76,7 +76,7 @@ async function commit() {
         @pointerdown="dragging = true"
         @change="commit"
       />
-      <p class="text-xs text-muted-foreground">While the Stream Deck app is connected, it sets the brightness itself.</p>
+      <p class="text-xs text-muted-foreground">While the Stream Deck app is connected, the app sets the brightness.</p>
     </div>
   </div>
 </template>

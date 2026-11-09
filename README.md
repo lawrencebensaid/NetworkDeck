@@ -20,7 +20,8 @@ network, so your profiles and plugins run unchanged — no laptop next to the de
 
 ## Matter
 
-Open **Integrations → Matter** in the web interface (or the Matter panel in the rail) and scan the QR code (in Home Assistant: **Add Matter device**
+Matter is off until you turn it on: open **Integrations → Matter** in the web interface (or the
+Matter panel in the rail), choose **Set up Matter**, and scan the QR code (in Home Assistant: **Add Matter device**
 in the companion app), or type the setup code. Each dock has its own random code. The dock is
 uncertified — it uses the Matter SDK's test attestation — so the app asks before adding it; with
 Google Home that needs a developer project for vendor `0xFFF1` / product `0x8000`.

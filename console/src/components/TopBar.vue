@@ -80,6 +80,8 @@ function toSettings(section: string) {
             <dt class="text-muted-foreground">Network</dt>
             <dd class="truncate">{{ s.wifi_ssid }}</dd>
           </template>
+          <dt class="text-muted-foreground">Hostname</dt>
+          <dd class="truncate font-mono text-xs leading-5">{{ s.hostname }}.local</dd>
           <dt class="text-muted-foreground">IP address</dt>
           <dd class="font-mono text-xs leading-5">{{ s.ip || "–" }}</dd>
           <dt class="text-muted-foreground">Addressing</dt>

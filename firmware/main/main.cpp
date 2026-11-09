@@ -3,6 +3,7 @@
 // Wiring only: usb_bridge (the deck) <-> dock_server (the Stream Deck app) while a host is connected,
 // deck_ui (the dock's own screens) otherwise; net, settings, web and OTA around them.
 
+#include <cctype>
 #include <cstdio>
 #include <string>
 
@@ -121,6 +122,29 @@ void actions_task(void*) {
     }
 }
 
+std::string json_escape(const std::string& in) {
+    std::string o;
+    for (char c : in) {
+        if (c == '"' || c == '\\') o += '\\';
+        if (static_cast<unsigned char>(c) >= 0x20) o += c;
+    }
+    return o;
+}
+
+// The hostname: the one set in the web interface, or the dock's name in lower case (deck32-204c).
+std::string hostname() {
+    std::string h = settings::hostname();
+    if (!h.empty()) return h;
+    for (char c : g_name) h.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    return h;
+}
+
+unsigned deck_keys() {
+    if (!usb_bridge::attached()) return 15;
+    const auto* m = deck_ui::find_model(usb_bridge::info().pid);
+    return m ? static_cast<unsigned>(m->keys()) : 15;
+}
+
 std::string status_json() {
     const auto s = net::status();
     const auto cfg = settings::network();
@@ -140,7 +164,10 @@ std::string status_json() {
     j += ",\"build\":\"" + std::string(esp_app_get_description()->version) + "\"";
     j += ",\"link\":\"" + std::string(net::link_name(s.link)) + "\",\"ip\":\"" + s.ip + "\"";
     j += ",\"wifi_available\":" + std::string(s.wifi_available ? "true" : "false");
-    j += ",\"wifi_ssid\":\"" + s.wifi_ssid + "\"";
+    j += ",\"wifi_enabled\":" + std::string(s.wifi_enabled ? "true" : "false");
+    j += ",\"wifi_ssid\":\"" + json_escape(s.wifi_ssid) + "\"";
+    j += ",\"wifi_rssi\":" + std::to_string(net::wifi_rssi());
+    j += ",\"hostname\":\"" + net::hostname() + "\"";
     j += ",\"dhcp\":" + std::string(cfg.dhcp ? "true" : "false");
     j += ",\"static_ip\":\"" + ip(cfg.ip) + "\",\"static_mask\":\"" + ip(cfg.mask) + "\",\"static_gateway\":\"" + ip(cfg.gateway) + "\"";
     j += ",\"host\":" + std::string(dock_server::host_connected() ? "true" : "false");
@@ -150,7 +177,8 @@ std::string status_json() {
 
 std::string matter_json() {
     const auto m = matter::status();
-    std::string j = "{\"running\":" + std::string(m.running ? "true" : "false");
+    std::string j = "{\"enabled\":" + std::string(settings::matter_enabled() ? "true" : "false");
+    j += ",\"running\":" + std::string(m.running ? "true" : "false");
     j += ",\"fabrics\":" + std::to_string(m.fabrics);
     j += ",\"window_open\":" + std::string(m.window_open ? "true" : "false");
     j += ",\"window_seconds\":" + std::to_string(m.window_seconds);
@@ -159,9 +187,9 @@ std::string matter_json() {
 }
 
 // Leaving every controller restarts the dock: give the web reply a moment to go out first.
-void matter_unpair_task(void*) {
+void matter_off_task(void*) {
     vTaskDelay(pdMS_TO_TICKS(500));
-    matter::unpair();
+    if (matter::unpair() != ESP_OK) esp_restart();  // not running: nothing to leave, start clean
     vTaskDelete(nullptr);
 }
 
@@ -197,6 +225,7 @@ extern "C" void app_main(void) {
     deck_ui::set_brightness(settings::deck_brightness());
 
     ESP_ERROR_CHECK(net::start(g_name, publish_net));
+    net::set_hostname(hostname());
     publish_net(net::status());
 
     dock_server::Config config;
@@ -232,9 +261,11 @@ extern "C" void app_main(void) {
 
     ESP_ERROR_CHECK(net::start_mdns(g_name, identity.serial, cora::kDockPort));
 
-    // Home Assistant and other Matter controllers: one switch per key (a Stream Deck MK.2 until a deck
-    // has been seen). Not fatal: the dock works without it.
-    if (esp_err_t err = matter::start(15, g_name); err != ESP_OK) ESP_LOGE(TAG, "Matter did not start: %s", esp_err_to_name(err));
+    // Matter (Home Assistant, Apple Home): off until it is set up in the web interface. A dock that
+    // ran Matter before it was opt-in has a setup code: it keeps running it.
+    if (!settings::matter_enabled() && matter::has_setup_code()) settings::set_matter_enabled(true);
+    if (settings::matter_enabled())
+        if (esp_err_t err = matter::start(deck_keys(), g_name); err != ESP_OK) ESP_LOGE(TAG, "Matter did not start: %s", esp_err_to_name(err));
 
     web::Hooks hooks;
     hooks.status_json = status_json;
@@ -258,9 +289,20 @@ extern "C" void app_main(void) {
     };
     hooks.matter_json = matter_json;
     hooks.matter_open = [] { return matter::open_window() == ESP_OK; };
-    hooks.matter_unpair = [] {
-        if (!matter::status().running) return false;
-        return xTaskCreate(matter_unpair_task, "unpair", 4096, nullptr, 5, nullptr) == pdPASS;
+    hooks.matter_setup = [] {
+        settings::set_matter_enabled(true);
+        if (matter::status().running) return true;
+        const esp_err_t err = matter::start(deck_keys(), g_name);
+        if (err != ESP_OK) ESP_LOGE(TAG, "Matter did not start: %s", esp_err_to_name(err));
+        return err == ESP_OK;
+    };
+    hooks.matter_off = [] {
+        settings::set_matter_enabled(false);
+        return xTaskCreate(matter_off_task, "matter_off", 4096, nullptr, 5, nullptr) == pdPASS;
+    };
+    hooks.set_hostname = [](const std::string& h) {
+        settings::set_hostname(h);
+        net::set_hostname(h.empty() ? hostname() : h);
     };
     ESP_ERROR_CHECK(web::start(hooks));
 

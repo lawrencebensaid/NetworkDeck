@@ -1,5 +1,6 @@
 #include "web.hpp"
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -297,11 +298,51 @@ esp_err_t password_post(httpd_req_t* req) {
 esp_err_t wifi_work(httpd_req_t* req) {
     std::string body;
     if (!read_form(req, body)) return result(req, false, "Bad request", "400 Bad Request");
-    settings::Wifi w{field(body, "ssid"), field(body, "password")};
+    settings::Wifi w;
+    w.enabled = true;
+    w.ssid = field(body, "ssid");
+    w.password = field(body, "password");
     if (w.ssid.empty()) return result(req, false, "Choose a network");
     if (!confirmed(req, "Join Wi-Fi '" + w.ssid + "'?")) return result(req, false, "Not confirmed on the deck");
     if (g_hooks.set_wifi) g_hooks.set_wifi(w);
     return result(req, true, "Joining " + w.ssid);
+}
+
+// Wi-Fi on or off. Off keeps the radio off, the setup hotspot too, so it is confirmed on the deck.
+esp_err_t wifi_enabled_work(httpd_req_t* req) {
+    std::string body;
+    if (!read_form(req, body)) return result(req, false, "Bad request", "400 Bad Request");
+    auto w = settings::wifi();
+    const bool on = field(body, "value") == "1";
+    if (on == w.enabled) return result(req, true, on ? "Wi-Fi is on" : "Wi-Fi is off");
+    if (!on && !confirmed(req, "Turn off Wi-Fi?")) return result(req, false, "Not confirmed on the deck");
+    w.enabled = on;
+    if (g_hooks.set_wifi) g_hooks.set_wifi(w);
+    return result(req, true, on ? "Wi-Fi is on" : "Wi-Fi is off");
+}
+
+esp_err_t wifi_forget_work(httpd_req_t* req) {
+    auto w = settings::wifi();
+    if (w.ssid.empty()) return result(req, true, "No saved network");
+    if (!confirmed(req, "Forget Wi-Fi '" + w.ssid + "'?")) return result(req, false, "Not confirmed on the deck");
+    const std::string was = w.ssid;
+    w.ssid.clear();
+    w.password.clear();
+    if (g_hooks.set_wifi) g_hooks.set_wifi(w);
+    return result(req, true, "Forgot " + was);
+}
+
+esp_err_t hostname_post(httpd_req_t* req) {
+    if (!allowed(req, true)) return ESP_OK;
+    std::string body;
+    if (!read_form(req, body)) return result(req, false, "Bad request", "400 Bad Request");
+    std::string h = field(body, "value");
+    for (char& c : h) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (h.size() > 6 && h.compare(h.size() - 6, 6, ".local") == 0) h.resize(h.size() - 6);
+    if (!h.empty() && !settings::valid_hostname(h))
+        return result(req, false, "Use letters, digits and hyphens (not at the start or end), at most 63");
+    if (g_hooks.set_hostname) g_hooks.set_hostname(h);
+    return result(req, true, h.empty() ? "Hostname back to the default" : "Hostname " + h + ".local");
 }
 
 esp_err_t network_work(httpd_req_t* req) {
@@ -327,10 +368,16 @@ void restart_soon(void*) {
     esp_restart();
 }
 
-esp_err_t matter_unpair_work(httpd_req_t* req) {
-    if (!confirmed(req, "Remove from Matter?")) return result(req, false, "Not confirmed on the deck");
-    if (!g_hooks.matter_unpair || !g_hooks.matter_unpair()) return result(req, false, "Matter is not running");
-    return result(req, true, "Removed from every controller, restarting");
+esp_err_t matter_off_work(httpd_req_t* req) {
+    if (!confirmed(req, "Turn off Matter?")) return result(req, false, "Not confirmed on the deck");
+    if (!g_hooks.matter_off || !g_hooks.matter_off()) return result(req, false, "Could not turn Matter off");
+    return result(req, true, "Matter is off: the dock left every controller and restarts");
+}
+
+esp_err_t matter_setup_post(httpd_req_t* req) {
+    if (!allowed(req, true)) return ESP_OK;
+    if (!g_hooks.matter_setup || !g_hooks.matter_setup()) return result(req, false, "Matter did not start: the serial log says why");
+    return result(req, true, "Matter is on: add the dock to a controller now");
 }
 
 // The image is written to the spare slot first; only after it validates and is confirmed on the deck
@@ -400,7 +447,9 @@ esp_err_t setup_post(httpd_req_t* req) {
 }
 // A scan takes a few seconds: on the worker, so the status and deck polls keep answering meanwhile.
 esp_err_t scan_get(httpd_req_t* req) { return allowed(req, false) ? run_async(req, scan_work) : ESP_OK; }
-esp_err_t matter_unpair_post(httpd_req_t* req) { return allowed(req, true) ? run_async(req, matter_unpair_work) : ESP_OK; }
+esp_err_t matter_off_post(httpd_req_t* req) { return allowed(req, true) ? run_async(req, matter_off_work) : ESP_OK; }
+esp_err_t wifi_enabled_post(httpd_req_t* req) { return allowed(req, true) ? run_async(req, wifi_enabled_work) : ESP_OK; }
+esp_err_t wifi_forget_post(httpd_req_t* req) { return allowed(req, true) ? run_async(req, wifi_forget_work) : ESP_OK; }
 esp_err_t wifi_post(httpd_req_t* req) { return allowed(req, true) ? run_async(req, wifi_work) : ESP_OK; }
 esp_err_t network_post(httpd_req_t* req) { return allowed(req, true) ? run_async(req, network_work) : ESP_OK; }
 esp_err_t update_post(httpd_req_t* req) { return allowed(req, true) ? run_async(req, update_work) : ESP_OK; }
@@ -438,7 +487,11 @@ esp_err_t start(const Hooks& hooks) {
         {"/api/deck/brightness", HTTP_POST, brightness_post, nullptr},
         {"/api/matter", HTTP_GET, matter_get, nullptr},
         {"/api/matter/open", HTTP_POST, matter_open_post, nullptr},
-        {"/api/matter/unpair", HTTP_POST, matter_unpair_post, nullptr},
+        {"/api/matter/setup", HTTP_POST, matter_setup_post, nullptr},
+        {"/api/matter/off", HTTP_POST, matter_off_post, nullptr},
+        {"/api/wifi/enabled", HTTP_POST, wifi_enabled_post, nullptr},
+        {"/api/wifi/forget", HTTP_POST, wifi_forget_post, nullptr},
+        {"/api/hostname", HTTP_POST, hostname_post, nullptr},
     };
     for (const auto& u : uris) httpd_register_uri_handler(server, &u);
     ESP_LOGI(TAG, "web interface on port 80");
