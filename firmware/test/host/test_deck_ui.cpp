@@ -15,7 +15,7 @@ NetInfo dhcp_net() {
     NetInfo n;
     n.link = "Ethernet";
     n.ip = "10.0.1.187";
-    n.firmware = "1.00.000";
+    n.firmware = "1.01.017";
     n.dhcp = true;
     return n;
 }
@@ -222,6 +222,14 @@ TEST_CASE("every screen renders on every key without going out of bounds") {
         for (int k = 0; k < m->keys(); ++k) ui.render(k, c);
         ui.on_key(m->cols + 1, true, 0);  // the mode key: into the editor
         for (int k = 0; k < m->keys(); ++k) ui.render(k, c);
+        ui.on_key(m->cols >= 5 ? 10 : 3, true, 0);  // ✕: back
+        ui.on_key(m->cols + 2, true, 0);  // Setup
+        for (int k = 0; k < m->keys(); ++k) ui.render(k, c);
+        ui.on_key(1, true, 0);  // Ethernet
+        for (int k = 0; k < m->keys(); ++k) ui.render(k, c);
+        ui.on_key(0, true, 0);
+        ui.on_key(2, true, 0);  // Wi-Fi
+        for (int k = 0; k < m->keys(); ++k) ui.render(k, c);
         ui.prompt(1, "Install firmware 1.01.000?", 0);
         for (int k = 0; k < m->keys(); ++k) ui.render(k, c);
         Hotspot h{true, "Deck32-204C", "abcd2345", "192.168.4.1"};
@@ -232,19 +240,56 @@ TEST_CASE("every screen renders on every key without going out of bounds") {
     }
 }
 
-TEST_CASE("setup key opens the editor in static mode too; info keys do nothing") {
+TEST_CASE("setup: Ethernet, then Static IP opens the editor; info keys do nothing") {
     Ui ui(mk2());
     NetInfo n = dhcp_net();
     n.dhcp = false;
     n.ip4 = {192, 168, 1, 50};
     ui.set_net(n);
     for (int k : {0, 1, 2, 5}) CHECK(ui.on_key(k, true, 0).kind == UiEvent::Kind::None);
-    CHECK(ui.on_key(7, true, 10).kind == UiEvent::Kind::None);  // setup -> editor, pre-filled
+    CHECK(ui.page() == Ui::Page::Network);
+    ui.on_key(7, true, 10);  // Setup
+    CHECK(ui.page() == Ui::Page::Setup);
+    ui.on_key(1, true, 11);  // Ethernet
+    CHECK(ui.page() == Ui::Page::Ethernet);
+    CHECK(ui.on_key(2, true, 12).kind == UiEvent::Kind::None);  // Static IP -> editor, pre-filled
+    CHECK(ui.page() == Ui::Page::Editor);
     CHECK(ui.on_key(14, true, 20).kind == UiEvent::Kind::None);
     CHECK(ui.on_key(14, true, 30).kind == UiEvent::Kind::None);
     auto ev = ui.on_key(14, true, 40);
     REQUIRE(ev.kind == UiEvent::Kind::SetStatic);
     CHECK(ev.ip == Ip4{10, 0, 1, 187});  // the current address wins over the stored one
+    CHECK(ui.page() == Ui::Page::Ethernet);  // back where the editor was opened
+}
+
+TEST_CASE("setup: Wi-Fi opens the hotspot, Back closes it, the switch turns Wi-Fi off and on") {
+    for (const Model* m : {&mk2(), &mini()}) {
+        Ui ui(*m);
+        NetInfo n = dhcp_net();
+        ui.set_net(n);
+        ui.on_key(m->cols + 2, true, 0);  // Setup
+        CHECK(ui.on_key(2, true, 1).kind == UiEvent::Kind::OpenHotspot);
+        CHECK(ui.page() == Ui::Page::Wifi);
+        auto ev = ui.on_key(1, true, 2);
+        CHECK(ev.kind == UiEvent::Kind::SetWifi);
+        CHECK_FALSE(ev.yes);
+        n.wifi_on = false;
+        ui.set_net(n);
+        CHECK(ui.on_key(1, true, 3).yes);
+        CHECK(ui.on_key(0, true, 4).kind == UiEvent::Kind::CloseHotspot);
+        CHECK(ui.page() == Ui::Page::Setup);
+        ui.on_key(0, true, 5);
+        CHECK(ui.page() == Ui::Page::Network);
+    }
+}
+
+TEST_CASE("with no other network, the hotspot brings up the Wi-Fi page") {
+    Ui ui(mini());
+    NetInfo n;
+    n.link = "Hotspot";
+    ui.set_net(n);
+    ui.set_hotspot({true, "Deck32-204C", "abcd2345", "192.168.4.1"});
+    CHECK(ui.page() == Ui::Page::Wifi);
 }
 
 TEST_CASE("an address splits over two keys after its second dot") {

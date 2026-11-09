@@ -34,6 +34,7 @@ Callbacks g_cb;
 std::mutex g_mutex;  // guards everything below
 std::unique_ptr<Ui> g_ui;
 const Model* g_model = nullptr;
+uint16_t g_pid = 0;  // the attached Elgato device, also one without dock screens
 NetInfo g_net;
 Hotspot g_hotspot;
 bool g_host = false;
@@ -203,12 +204,13 @@ void start(const Callbacks& cb) {
     g_events = xQueueCreate(8, sizeof(UiEvent));
     g_answer = xSemaphoreCreateBinary();
     g_confirm_lock = xSemaphoreCreateMutex();
-    xTaskCreatePinnedToCore(task, "deck_ui", 8192, nullptr, 5, &g_task, 1);
+    xTaskCreatePinnedToCore(task, "deck_ui", 16384, nullptr, 5, &g_task, 1);
 }
 
 void deck_attached(uint16_t pid) {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_model = find_model(pid);
+    g_pid = pid;
     if (!g_model) {
         ESP_LOGI(TAG, "deck %04x: no dock screens for this model", pid);
         g_ui.reset();
@@ -231,6 +233,7 @@ void deck_attached(uint16_t pid) {
 void deck_detached() {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_model = nullptr;
+    g_pid = 0;
     g_ui.reset();
     if (g_prompt.active) {
         g_prompt.active = false;
@@ -388,12 +391,18 @@ std::vector<uint8_t> key_image(int key, std::string& content_type) {
 
 std::string deck_json() {
     std::lock_guard<std::mutex> lock(g_mutex);
-    if (!g_model) return "{\"attached\":false}";
-    const bool dock = owns_locked();
-    char head[256];
-    std::snprintf(head, sizeof(head),
-                  "{\"attached\":true,\"model\":\"%s\",\"cols\":%d,\"rows\":%d,\"key_px\":%d,\"transform\":\"%s\",\"source\":\"%s\",\"brightness\":%d",
-                  g_model->name, g_model->cols, g_model->rows, g_model->key_px, css_transform(*g_model), dock ? "dock" : "app", g_brightness);
+    if (!g_pid) return "{\"attached\":false}";
+    char head[320];
+    if (!g_model) {
+        // A deck the dock bridges but has no live view of: the page draws its shape from the pid.
+        std::snprintf(head, sizeof(head), "{\"attached\":true,\"pid\":%u,\"live\":false,\"source\":\"%s\"", g_pid,
+                      g_host ? "app" : "dock");
+    } else {
+        std::snprintf(head, sizeof(head),
+                      "{\"attached\":true,\"pid\":%u,\"live\":true,\"model\":\"%s\",\"cols\":%d,\"rows\":%d,\"key_px\":%d,\"transform\":\"%s\",\"source\":\"%s\",\"brightness\":%d",
+                      g_pid, g_model->name, g_model->cols, g_model->rows, g_model->key_px, css_transform(*g_model),
+                      owns_locked() ? "dock" : "app", g_brightness);
+    }
     std::string j = head;
     if (usb_bridge::attached()) {
         const auto info = usb_bridge::info();
@@ -407,6 +416,8 @@ std::string deck_json() {
         std::snprintf(rev, sizeof(rev), "%x.%02x", info.bcd_device >> 8, info.bcd_device & 0xff);
         j += ",\"product\":\"" + clean(info.product) + "\",\"serial\":\"" + clean(info.serial) + "\",\"usb_rev\":\"" + rev + "\"";
     }
+    if (!g_model) return j + "}";
+    const bool dock = owns_locked();
     j += ",\"keys\":[";
     for (int k = 0; k < g_model->keys(); ++k) {
         char b[64];

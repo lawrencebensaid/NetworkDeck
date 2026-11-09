@@ -41,6 +41,8 @@ export interface Status {
   static_mask: string;
   static_gateway: string;
   host: boolean;
+  host_ip: string; /* the computer running the Stream Deck app, empty when none */
+  host_seconds: number; /* connected this long */
   deck: string;
 }
 
@@ -51,6 +53,8 @@ export interface DeckKey {
 
 export interface Deck {
   attached: boolean;
+  pid?: number; /* USB product id */
+  live?: boolean; /* false: a deck the dock bridges but can't show the keys of */
   model?: string;
   cols?: number;
   rows?: number;

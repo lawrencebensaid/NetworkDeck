@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /*
- * The settings window: the dock's network, Wi-Fi, firmware and password, one section at a time, and
+ * The settings window: the dock's network, Wi-Fi, firmware, users and this page's appearance, one at a time, and
  * what it says of itself. Every change is confirmed on the deck (the sections say so where it applies).
  */
 import { computed, type Component } from "vue"
@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button"
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import AboutPanel from "../panels/AboutPanel.vue"
+import AppearancePanel from "../panels/AppearancePanel.vue"
 import FirmwarePanel from "../panels/FirmwarePanel.vue"
 import NetworkPanel from "../panels/NetworkPanel.vue"
 import UsersPanel from "../panels/UsersPanel.vue"
@@ -33,6 +34,7 @@ const sections = computed<Section[]>(() => [
     : []),
   { id: "firmware", title: "Firmware", blurb: "What runs on the dock, and installing an update.", view: FirmwarePanel },
   { id: "users", title: "Users", blurb: "Who signs in to this web interface, and how: a password or passkeys.", view: UsersPanel },
+  { id: "appearance", title: "Appearance", blurb: "How this page looks in this browser.", view: AppearancePanel },
 ])
 const extra: Section[] = [{ id: "about", title: "About", blurb: "What the dock says of itself.", view: AboutPanel }]
 

@@ -16,10 +16,24 @@ adds a line under "Unreleased"; the release that raises `VERSION` renames that s
 - Wi-Fi can be turned off, and the Wi-Fi settings show the saved network, its signal and a list to
   choose from (hidden networks too); the saved network can be forgotten.
 - The hostname (`<name>.local`) is shown and can be changed.
+- The deck in the web interface is drawn as the real hardware for every Stream Deck model: its
+  proportions, the Stream Deck logo, the key caps, and the + and + XL's touch strip and dials.
+- Setup on the deck now asks Ethernet or Wi-Fi. Wi-Fi shows a QR code to join the dock's setup network,
+  also while the cable is in, and can turn Wi-Fi back on.
+- The web interface shows which computer's Stream Deck app is connected, and since when.
+- Settings → Appearance: light, dark or follow the system.
+- Firmware updates: drop the `.bin` from a GitHub release on the page; its version shows before it is sent.
 - Matter: add the dock to Home Assistant, Apple Home or Google Home with the QR code in the web
   interface (Integrations). It is off until you choose Set up Matter. Each key is a button there (press, release, long press) for automations.
 
+### Fixed
+- Without an Ethernet cable the dock joins the saved Wi-Fi network (it could give up after one try),
+  and opens its setup network when there is none.
+- Turning off Matter works again (the web interface could stop answering).
+- The dock could restart while showing the setup network's QR code on the deck.
+
 ### Changed
+- The dock reports firmware 1.01.017 to the Stream Deck app, as Elgato's latest Network Dock does.
 - Key images reach the deck about six times faster: full-deck redraws went from 3–4 to over 20 a second.
 
 ### Security

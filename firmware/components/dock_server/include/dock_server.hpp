@@ -25,6 +25,14 @@ void start(const Config& config);
 
 bool host_connected();
 
+// The computer running the Stream Deck app: its address (empty when none) and how long it has been
+// connected.
+struct Host {
+    std::string ip;
+    uint32_t seconds = 0;
+};
+Host host();
+
 // Wire these to usb_bridge's callbacks.
 void deck_attached(const usb_bridge::DeckInfo& info);
 void deck_detached();

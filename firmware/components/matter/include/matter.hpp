@@ -42,7 +42,8 @@ Status status();
 // Lets a new controller add the dock for 15 minutes.
 esp_err_t open_window();
 
-// Leaves every controller (removes all fabrics), forgets the setup code and restarts the dock.
+// Leaves every controller (removes all fabrics) and erases Matter's storage and the setup code.
+// Restart afterwards: the stack still runs until then.
 esp_err_t unpair();
 
 // A setup code was made on this dock (Matter was set up before; the code is kept until unpair()).
