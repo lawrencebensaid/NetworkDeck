@@ -50,6 +50,9 @@ std::string g_eth_ip, g_sta_ip;
 bool g_sta_connected = false;
 bool g_wifi_started = false;
 bool g_ap_on = false;
+bool g_hotspot_open = true;     // no deck to show its password on (set_hotspot_open)
+std::string g_hotspot_password;
+bool g_publish = false;         // publish the status even if the link didn't change
 bool g_scanning = false;  // a scan asked for Wi-Fi: the policy must not switch it off meanwhile
 uint32_t g_wifi_since = 0;  // when we started trying the saved network
 bool g_sta_wanted = false;  // the station should be joining the saved network
@@ -144,6 +147,28 @@ bool wifi_init() {
     return true;
 }
 
+// The setup network. With a Stream Deck attached it has a password, shown on the deck (whoever reads it
+// is at the dock). Without one there is nowhere to show a password, so it is open.
+void configure_ap() {
+    if (g_hotspot_password.empty()) g_hotspot_password = random_password();
+    g_status.hotspot_password = g_hotspot_open ? "" : g_hotspot_password;
+    const std::string ssid = hotspot_name();
+    g_status.hotspot_ssid = ssid;
+    wifi_config_t ac{};
+    std::strncpy(reinterpret_cast<char*>(ac.ap.ssid), ssid.c_str(), sizeof(ac.ap.ssid) - 1);
+    ac.ap.ssid_len = static_cast<uint8_t>(ssid.size());
+    if (g_hotspot_open) {
+        ac.ap.authmode = WIFI_AUTH_OPEN;
+    } else {
+        std::strncpy(reinterpret_cast<char*>(ac.ap.password), g_hotspot_password.c_str(), sizeof(ac.ap.password) - 1);
+        ac.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    }
+    ac.ap.max_connection = 4;
+    ac.ap.channel = 6;
+    esp_wifi_set_config(WIFI_IF_AP, &ac);
+    g_status.hotspot_ip = "192.168.4.1";
+}
+
 void wifi_mode(bool sta, bool ap) {
     if (!g_status.wifi_available) return;
     if (!sta && !ap) {
@@ -177,20 +202,7 @@ void wifi_mode(bool sta, bool ap) {
         sc.sta.pmf_cfg.capable = true;
         esp_wifi_set_config(WIFI_IF_STA, &sc);
     }
-    if (ap) {
-        if (g_status.hotspot_password.empty()) g_status.hotspot_password = random_password();
-        const std::string ssid = hotspot_name();
-        g_status.hotspot_ssid = ssid;
-        wifi_config_t ac{};
-        std::strncpy(reinterpret_cast<char*>(ac.ap.ssid), ssid.c_str(), sizeof(ac.ap.ssid) - 1);
-        ac.ap.ssid_len = static_cast<uint8_t>(ssid.size());
-        std::strncpy(reinterpret_cast<char*>(ac.ap.password), g_status.hotspot_password.c_str(), sizeof(ac.ap.password) - 1);
-        ac.ap.authmode = WIFI_AUTH_WPA2_PSK;
-        ac.ap.max_connection = 4;
-        ac.ap.channel = 6;
-        esp_wifi_set_config(WIFI_IF_AP, &ac);
-        g_status.hotspot_ip = "192.168.4.1";
-    }
+    if (ap) configure_ap();
     const bool was_sta = g_sta_wanted;
     g_sta_wanted = sta;
     g_ap_on = ap;
@@ -348,11 +360,12 @@ void policy_locked(uint32_t boot) {
     if (!g_ap_on) {
         s.hotspot_ssid.clear();
     }
-    const bool changed = s.link != g_status.link || s.ip != g_status.ip || s.hotspot_ssid != g_status.hotspot_ssid ||
+    const bool changed = g_publish || s.link != g_status.link || s.ip != g_status.ip || s.hotspot_ssid != g_status.hotspot_ssid ||
                          s.wifi_ssid != g_status.wifi_ssid || s.wifi_enabled != g_status.wifi_enabled;
     const std::string keep_pw = g_status.hotspot_password;
     g_status = s;
     g_status.hotspot_password = keep_pw;
+    g_publish = false;
     if (changed) {
         ESP_LOGI(TAG, "link %s, IP %s", link_name(s.link), s.ip.empty() ? "-" : s.ip.c_str());
         if (g_on_change) {
@@ -487,6 +500,18 @@ void join(const settings::Wifi& w) {
         g_sta_ip.clear();
         g_ap_on = false;
     }
+    wake();
+}
+
+void set_hotspot_open(bool open) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (open == g_hotspot_open) return;
+    g_hotspot_open = open;
+    if (g_ap_on) {
+        configure_ap();
+        ESP_LOGI(TAG, "hotspot %s", open ? "open (no deck to show a password on)" : "with a password (shown on the deck)");
+    }
+    g_publish = true;
     wake();
 }
 

@@ -47,6 +47,9 @@ std::vector<ScanResult> scan();
 // Holds the setup hotspot open for 15 minutes, also while Ethernet is up (asked for on the deck);
 // false closes it again (unless the dock has no other network).
 void open_hotspot(bool open);
+// The setup network has no password while no Stream Deck is attached (there is nowhere to show one);
+// with a deck it has one, shown on the deck. Open until told otherwise.
+void set_hotspot_open(bool open);
 
 // Ethernet MAC (also the dock's identity: serial and mDNS name derive from it).
 std::array<uint8_t, 6> mac();

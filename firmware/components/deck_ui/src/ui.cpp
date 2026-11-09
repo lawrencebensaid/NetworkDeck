@@ -461,7 +461,10 @@ void Ui::render(int key, Canvas& c) const {
                         net_.link == "Wi-Fi" ? color::kGreen : color::kWhite);
             break;
         case Role::Qr:
-            if (hotspot_.active) c.qr("WIFI:T:WPA;S:" + hotspot_.ssid + ";P:" + hotspot_.password + ";;", 0, 0, k);
+            if (hotspot_.active)
+                c.qr(hotspot_.password.empty() ? "WIFI:T:nopass;S:" + hotspot_.ssid + ";;"
+                                               : "WIFI:T:WPA;S:" + hotspot_.ssid + ";P:" + hotspot_.password + ";;",
+                     0, 0, k);
             break;
         case Role::HotspotName:
             if (hotspot_.active) label_value(c, "1. Join", hotspot_.ssid, color::kWhite);
@@ -469,7 +472,7 @@ void Ui::render(int key, Canvas& c) const {
             else centered_lines(c, {"Starting", "hotspot..."}, kSmallFont, 0, k, color::kLabel);
             break;
         case Role::HotspotPassword:
-            if (hotspot_.active) label_value(c, "Password", hotspot_.password, color::kWhite);
+            if (hotspot_.active) label_value(c, "Password", hotspot_.password.empty() ? "None" : hotspot_.password, color::kWhite);
             break;
         case Role::HotspotUrl:
             if (hotspot_.active) label_value(c, "2. Open", hotspot_.url, color::kWhite);

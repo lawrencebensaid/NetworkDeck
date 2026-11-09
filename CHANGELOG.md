@@ -25,6 +25,8 @@ adds a line under "Unreleased"; the release that raises `VERSION` renames that s
   connected) and its pin, a pin for a switched USB port, and restarting the dock.
 - Firmware for the ESP32-C6, for the web interface without a P4: Wi-Fi only, no Stream Deck (the C6 has no
   USB host) and no Matter yet. The setup network is called "NetworkDeck ESP32-P4" or "NetworkDeck ESP32-C6".
+  It is open while no Stream Deck is attached (there is nowhere to show its password); with a deck it
+  has a password, shown on the deck.
 - The computer the Stream Deck app connected from is shown above the deck.
 - Versions say what a build is: `0.2.0` a release, `0.2.0-beta.N` a build of develop, `0.2.0-pr.4.N`
   a test build of a pull request, `0.2.0-dev+<commit>` a local build.

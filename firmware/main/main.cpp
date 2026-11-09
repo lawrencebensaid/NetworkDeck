@@ -534,12 +534,14 @@ extern "C" void app_main(void) {
         eventlog::add(Cat::Deck, Level::Info, "%s plugged in (serial %s)", info.product.empty() ? "Stream Deck" : info.product.c_str(),
                       info.serial.c_str());
         dock_server::deck_attached(info);
+        net::set_hotspot_open(false);  // now there is a deck to show the setup network's password on
         deck_ui::deck_attached(info.pid);
         if (const auto* m = deck_ui::find_model(info.pid)) matter::remember_keys(static_cast<unsigned>(m->keys()));
     };
     cb.on_detach = [] {
         ESP_LOGI(TAG, "deck unplugged");
         eventlog::add(Cat::Deck, Level::Info, "Stream Deck unplugged");
+        net::set_hotspot_open(true);
         deck_ui::deck_detached();
         dock_server::deck_detached();
     };
