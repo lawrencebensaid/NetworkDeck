@@ -86,10 +86,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The P4 keeps the plain file names (the dock's own hardware); other chips carry their name.
+        # Files are named networkdeck-<chip>-v<version> (networkdeck-esp32c6-v0.2.0-pr.4.19).
         include:
-          - { chip: esp32p4, dir: build, args: "", suffix: "", board: "the Waveshare ESP32-P4-NANO" }
-          - { chip: esp32c6, dir: build-c6, args: "-B build-c6 -DIDF_TARGET=esp32c6 -DSDKCONFIG=sdkconfig.c6", suffix: "-esp32c6", board: "ESP32-C6 boards (web interface only: no USB host)" }
+          - { chip: esp32p4, dir: build, args: "", board: "the Waveshare ESP32-P4-NANO" }
+          - { chip: esp32c6, dir: build-c6, args: "-B build-c6 -DIDF_TARGET=esp32c6 -DSDKCONFIG=sdkconfig.c6", board: "ESP32-C6 boards (web interface only: no USB host)" }
     env:
       NETWORKDECK_VERSION: ${{ needs.plan.outputs.version }}
     defaults:
@@ -108,7 +108,7 @@ jobs:
         run: |
           apt-get update -qq > /dev/null 2>&1; apt-get install -y -qq --no-install-recommends zip > /dev/null 2>&1 || true
           . "$IDF_PATH/export.sh" > /dev/null
-          name=networkdeck-$NETWORKDECK_VERSION${{ matrix.suffix }}
+          name=networkdeck-${{ matrix.chip }}-v$NETWORKDECK_VERSION
           b=${{ matrix.dir }}
           dist=$GITHUB_WORKSPACE/dist
           mkdir -p "$dist/$name"
@@ -125,11 +125,11 @@ jobs:
           From this folder, with ESP-IDF's environment (or pip install esptool):
             python -m esptool --chip ${{ matrix.chip }} -p <port> -b 460800 write-flash @flash_args
 
-          Or the single image from the release: write networkdeck-$NETWORKDECK_VERSION-full.bin at 0x0.
-          Later updates: upload networkdeck-$NETWORKDECK_VERSION.bin in the dock's web interface.
+          Or the single image from the release: write $name-full.bin at 0x0.
+          Later updates: drop $name.bin (not -full) on Settings → Firmware in the dock's web interface.
           TXT
           (cd "$dist" && zip -qr "$name.zip" "$name" && rm -rf "$name")
-          (cd "$dist" && sha256sum * > SHA256SUMS${{ matrix.suffix }})
+          (cd "$dist" && sha256sum * > SHA256SUMS-${{ matrix.chip }})
           echo "name=$name" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
@@ -158,12 +158,12 @@ jobs:
           {
             awk -v v="$v" '$0 ~ "^## \\[" v "\\]" {f=1; next} f && /^## / {exit} f' CHANGELOG.md
             echo
-            echo "Firmware $v for the Waveshare ESP32-P4-NANO (PoE); \`*-esp32c6*\` files are for ESP32-C6 boards (web interface only)."
+            echo "Firmware $v. Take the files for your chip: \`networkdeck-esp32p4-v$v*\` for the Waveshare ESP32-P4-NANO (PoE), \`networkdeck-esp32c6-v$v*\` for ESP32-C6 boards (web interface only: no USB host for a Stream Deck)."
             echo
-            echo '- `networkdeck-*-full.bin`: everything, to write at 0x0 over USB (first install).'
-            echo '- `networkdeck-*.bin`: the app alone, for the web interface'"'"'s firmware upload.'
-            echo '- `networkdeck-*.zip`: the separate images with `flash_args`.'
-            echo '- `networkdeck-*.elf`: the matching ELF, to decode a crash backtrace.'
+            echo '- `…-full.bin`: everything, to write at 0x0 over USB (the first install).'
+            echo '- `….bin`: the app alone, to drop on Settings → Firmware for an update.'
+            echo '- `….zip`: the separate images with `flash_args`.'
+            echo '- `….elf`: the matching ELF, to decode a crash backtrace.'
           } > release-body.md
           cat release-body.md
       - uses: softprops/action-gh-release@v2

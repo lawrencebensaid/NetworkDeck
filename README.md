@@ -41,14 +41,14 @@ it again, also to add a second controller (say, Home Assistant next to Apple Hom
 
 ## Install
 
-Download `networkdeck-<version>-full.bin` from the [latest release](../../releases/latest) and write it at
+Download `networkdeck-esp32p4-v<version>-full.bin` (or `networkdeck-esp32c6-v…` for an ESP32-C6 board) from the [latest release](../../releases/latest) and write it at
 offset 0 over the board's Type-C port:
 
 ```sh
-python -m esptool --chip esp32p4 -p /dev/cu.usbmodem<…> -b 460800 write-flash 0x0 networkdeck-<version>-full.bin
+python -m esptool --chip esp32p4 -p /dev/cu.usbmodem<…> -b 460800 write-flash 0x0 networkdeck-esp32p4-v<version>-full.bin
 ```
 
-Later updates: drop `networkdeck-<version>.bin` on Settings → Firmware in the web interface.
+Later updates: drop `networkdeck-<chip>-v<version>.bin` (without `-full`) on Settings → Firmware in the web interface.
 
 ## API
 

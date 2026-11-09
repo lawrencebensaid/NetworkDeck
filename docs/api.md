@@ -87,7 +87,7 @@ header is not needed.
 
 | Method | Path | What |
 |---|---|---|
-| POST | `/api/update` | The body is `networkdeck-<version>.bin` (`application/octet-stream`). Checked, confirmed on the deck, then the dock restarts into it; if it doesn't start, the dock goes back. |
+| POST | `/api/update` | The body is `networkdeck-<chip>-v<version>.bin` (`application/octet-stream`). Checked, confirmed on the deck, then the dock restarts into it; if it doesn't start, the dock goes back. |
 
 ### Users and keys
 
