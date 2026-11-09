@@ -17,6 +17,7 @@
 #include <setup_payload/QRCodeSetupPayloadGenerator.h>
 
 #include "esp_log.h"
+#include "eventlog.hpp"
 #include "esp_random.h"
 #include "esp_timer.h"
 #include "nvs.h"
@@ -157,9 +158,11 @@ void on_event(const ChipDeviceEvent* event, intptr_t) {
     switch (event->Type) {
         case kCommissioningComplete:
             ESP_LOGI(TAG, "added to a controller");
+            eventlog::add(eventlog::Cat::Matter, eventlog::Level::Info, "Added to a Matter controller");
             break;
         case kFailSafeTimerExpired:
             ESP_LOGW(TAG, "adding to a controller failed (fail-safe expired)");
+            eventlog::add(eventlog::Cat::Matter, eventlog::Level::Warn, "Adding to a Matter controller failed");
             break;
         case kCommissioningWindowOpened:
             ESP_LOGI(TAG, "pairing open");
@@ -311,6 +314,8 @@ esp_err_t open_window() {
     PlatformMgr().UnlockChipStack();
     return ok ? ESP_OK : ESP_FAIL;
 }
+
+bool available() { return true; }
 
 bool has_setup_code() {
     nvs_handle_t h;

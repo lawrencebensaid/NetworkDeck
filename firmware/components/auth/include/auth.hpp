@@ -55,6 +55,23 @@ Login passkey_login(const std::string& rp_id, const std::string& origin, const s
                     const std::string& client_data_b64, const std::string& authenticator_data_b64,
                     const std::string& signature_b64, std::string& token, const char*& why);
 
+// ── API keys ──
+// For scripts and tools: sent as "Authorization: Bearer ndk_…". Stored as SHA-256 hashes in NVS
+// (namespace "deck32", so a factory reset erases them); the key itself is shown once, when it is made.
+struct ApiKey {
+    std::string id;     // 12 hex characters
+    std::string name;
+    uint32_t created;   // Unix time, 0 if the clock wasn't set
+    uint32_t last_used; // Unix time since this start, 0 if not used (api_key_check: 0 on the first use)
+};
+inline constexpr size_t kMaxApiKeys = 8;
+std::vector<ApiKey> api_keys();
+// The new key (shown once), or empty if the name is empty or too long, or there are kMaxApiKeys.
+std::string api_key_create(const std::string& name, std::string& id);
+bool api_key_remove(const std::string& id);
+// True if `secret` is a stored key; `who` is it.
+bool api_key_check(const std::string& secret, ApiKey& who);
+
 inline constexpr size_t kMinLength = 8;
 
 }  // namespace auth

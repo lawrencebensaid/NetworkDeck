@@ -1,5 +1,6 @@
 // The dock's web interface (the console in console/, served gzipped) and its API. Everything but the
-// page and sign-in needs a session; changes are also confirmed on the deck, except from the setup hotspot.
+// page and sign-in needs a session or an API key; changes are also confirmed on the deck, except from the
+// setup hotspot. The endpoints are listed in docs/api.md.
 #pragma once
 
 #include <functional>
@@ -37,6 +38,11 @@ struct Hooks {
     std::function<bool()> matter_setup;
     std::function<bool()> matter_open;
     std::function<bool()> matter_off;
+    // POST /api/deck/finish: how the attached deck is drawn ("black" or "white"), remembered per serial.
+    std::function<bool(const std::string& finish)> set_deck_finish;
+    // GET /api/system (hardware, options), POST /api/system (Settings → System).
+    std::function<std::string()> system_json;
+    std::function<void(const settings::System&)> set_system;
 };
 
 esp_err_t start(const Hooks& hooks);

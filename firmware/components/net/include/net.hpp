@@ -15,6 +15,8 @@ namespace net {
 
 enum class Link { None, Ethernet, Wifi, Hotspot };
 const char* link_name(Link l);
+// The chip the firmware runs on: "ESP32-P4", "ESP32-C6".
+const char* chip_name();
 
 struct Status {
     Link link = Link::None;
@@ -45,6 +47,9 @@ std::vector<ScanResult> scan();
 // Holds the setup hotspot open for 15 minutes, also while Ethernet is up (asked for on the deck);
 // false closes it again (unless the dock has no other network).
 void open_hotspot(bool open);
+// The setup network has no password while no Stream Deck is attached (there is nowhere to show one);
+// with a deck it has one, shown on the deck. Open until told otherwise.
+void set_hotspot_open(bool open);
 
 // Ethernet MAC (also the dock's identity: serial and mDNS name derive from it).
 std::array<uint8_t, 6> mac();
@@ -57,6 +62,15 @@ esp_err_t start_mdns(const std::string& name, const std::string& serial, uint16_
 // the next lease.
 void set_hostname(const std::string& host);
 std::string hostname();
+
+// A computer on the network by its address: the name the network's DNS server has for it (the router,
+// from its DHCP lease: "MacBookPro"), else its own NetBIOS name (Windows, and Macs with file sharing:
+// "MAC-MINI"). `hostname` is the full DNS name. Empty when neither answers.
+// Blocks for up to two seconds: call it off the network task.
+struct Peer {
+    std::string name, hostname;
+};
+Peer describe(const std::string& ip);
 
 // Signal of the joined Wi-Fi network in dBm, 0 when not on Wi-Fi.
 int wifi_rssi();

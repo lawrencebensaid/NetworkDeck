@@ -49,4 +49,7 @@ esp_err_t unpair();
 // A setup code was made on this dock (Matter was set up before; the code is kept until unpair()).
 bool has_setup_code();
 
+// Matter is in this build (the ESP32-P4 so far).
+bool available();
+
 }  // namespace matter

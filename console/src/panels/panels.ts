@@ -1,10 +1,10 @@
-/* The panels the rail opens beside the deck. Settings and integrations are dialogs (see ConsoleView). */
-export type PanelId = "deck" | "matter" | "diagnostics";
+/* The panels the rail opens beside the deck. Settings and connectors are dialogs (see ConsoleView). */
+export type PanelId = "deck" | "dock" | "matter";
 
 export const PANELS: Record<PanelId, { title: string }> = {
   deck: { title: "Stream Deck" },
+  dock: { title: "Network Deck" },
   matter: { title: "Matter" },
-  diagnostics: { title: "Diagnostics" },
 };
 
 /* Wide enough for a panel beside the deck. */

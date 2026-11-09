@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /* What the dock says of itself. */
 import { store } from "../session/store.ts"
+import { versionKind, versionLabel } from "@/lib/version"
 </script>
 
 <template>
@@ -10,7 +11,7 @@ import { store } from "../session/store.ts"
     <dt class="text-muted-foreground">Serial number</dt>
     <dd class="font-mono select-all">{{ store.status?.serial ?? "–" }}</dd>
     <dt class="text-muted-foreground">Firmware</dt>
-    <dd class="font-mono">{{ store.status?.build ?? "–" }}</dd>
+    <dd><span class="font-mono">{{ versionLabel(store.status?.build) }}</span> <span class="text-muted-foreground">· {{ versionKind(store.status?.build) }}</span></dd>
     <dt class="text-muted-foreground">Reported to the app</dt>
     <dd class="font-mono">{{ store.status?.firmware ?? "–" }}</dd>
     <dt class="text-muted-foreground">Board</dt>

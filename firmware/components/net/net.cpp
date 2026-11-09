@@ -19,7 +19,9 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "lwip/ip4_addr.h"
+#include "lwip/sockets.h"
 #include "mdns.h"
+#include "eventlog.hpp"
 
 namespace net {
 namespace {
@@ -48,6 +50,9 @@ std::string g_eth_ip, g_sta_ip;
 bool g_sta_connected = false;
 bool g_wifi_started = false;
 bool g_ap_on = false;
+bool g_hotspot_open = true;     // no deck to show its password on (set_hotspot_open)
+std::string g_hotspot_password;
+bool g_publish = false;         // publish the status even if the link didn't change
 bool g_scanning = false;  // a scan asked for Wi-Fi: the policy must not switch it off meanwhile
 uint32_t g_wifi_since = 0;  // when we started trying the saved network
 bool g_sta_wanted = false;  // the station should be joining the saved network
@@ -102,6 +107,9 @@ std::string random_password() {
 
 // ── Wi-Fi ───────────────────────────────────────────────────────────────────
 
+// The setup network: "NetworkDeck ESP32-P4", after the chip the firmware runs on.
+std::string hotspot_name() { return std::string("NetworkDeck ") + chip_name(); }
+
 void try_connect() {
     if (!g_sta_wanted || !g_sta_started || g_sta_connected || g_scanning) return;  // a connect aborts a scan
     g_last_try = now_ms();
@@ -122,19 +130,43 @@ bool wifi_init() {
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_err_t err = esp_wifi_init(&cfg);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Wi-Fi unavailable: %s (is the C6 running esp-hosted?)", esp_err_to_name(err));
+        ESP_LOGE(TAG, "Wi-Fi unavailable: %s (on the P4: is the co-processor running esp-hosted?)", esp_err_to_name(err));
         return false;
     }
     esp_wifi_set_storage(WIFI_STORAGE_RAM);
     // The C5 does 2.4 and 5 GHz: look for the saved network on both (a 5 GHz-only network is
     // otherwise never found).
+#if CONFIG_IDF_TARGET_ESP32P4 || CONFIG_SOC_WIFI_SUPPORT_5G
     wifi_band_mode_t band = WIFI_BAND_MODE_2G_ONLY;
     esp_wifi_get_band_mode(&band);
     if (band != WIFI_BAND_MODE_AUTO) {
         err = esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO);
         ESP_LOGI(TAG, "Wi-Fi bands: was %d, now 2.4 + 5 GHz (%s)", static_cast<int>(band), esp_err_to_name(err));
     }
+#endif
     return true;
+}
+
+// The setup network. With a Stream Deck attached it has a password, shown on the deck (whoever reads it
+// is at the dock). Without one there is nowhere to show a password, so it is open.
+void configure_ap() {
+    if (g_hotspot_password.empty()) g_hotspot_password = random_password();
+    g_status.hotspot_password = g_hotspot_open ? "" : g_hotspot_password;
+    const std::string ssid = hotspot_name();
+    g_status.hotspot_ssid = ssid;
+    wifi_config_t ac{};
+    std::strncpy(reinterpret_cast<char*>(ac.ap.ssid), ssid.c_str(), sizeof(ac.ap.ssid) - 1);
+    ac.ap.ssid_len = static_cast<uint8_t>(ssid.size());
+    if (g_hotspot_open) {
+        ac.ap.authmode = WIFI_AUTH_OPEN;
+    } else {
+        std::strncpy(reinterpret_cast<char*>(ac.ap.password), g_hotspot_password.c_str(), sizeof(ac.ap.password) - 1);
+        ac.ap.authmode = WIFI_AUTH_WPA2_PSK;
+    }
+    ac.ap.max_connection = 4;
+    ac.ap.channel = 6;
+    esp_wifi_set_config(WIFI_IF_AP, &ac);
+    g_status.hotspot_ip = "192.168.4.1";
 }
 
 void wifi_mode(bool sta, bool ap) {
@@ -170,19 +202,7 @@ void wifi_mode(bool sta, bool ap) {
         sc.sta.pmf_cfg.capable = true;
         esp_wifi_set_config(WIFI_IF_STA, &sc);
     }
-    if (ap) {
-        if (g_status.hotspot_password.empty()) g_status.hotspot_password = random_password();
-        g_status.hotspot_ssid = g_name;
-        wifi_config_t ac{};
-        std::strncpy(reinterpret_cast<char*>(ac.ap.ssid), g_name.c_str(), sizeof(ac.ap.ssid) - 1);
-        ac.ap.ssid_len = static_cast<uint8_t>(g_name.size());
-        std::strncpy(reinterpret_cast<char*>(ac.ap.password), g_status.hotspot_password.c_str(), sizeof(ac.ap.password) - 1);
-        ac.ap.authmode = WIFI_AUTH_WPA2_PSK;
-        ac.ap.max_connection = 4;
-        ac.ap.channel = 6;
-        esp_wifi_set_config(WIFI_IF_AP, &ac);
-        g_status.hotspot_ip = "192.168.4.1";
-    }
+    if (ap) configure_ap();
     const bool was_sta = g_sta_wanted;
     g_sta_wanted = sta;
     g_ap_on = ap;
@@ -203,7 +223,7 @@ void wifi_mode(bool sta, bool ap) {
         try_connect();
     }
     ESP_LOGI(TAG, "Wi-Fi %s%s%s", sta ? "joining '" : "", sta ? (g_wifi_cfg.ssid + "'").c_str() : "",
-             ap ? (std::string(sta ? " + " : "") + "hotspot " + g_name).c_str() : "");
+             ap ? (std::string(sta ? " + " : "") + "hotspot " + hotspot_name()).c_str() : "");
 }
 
 // ── events ──────────────────────────────────────────────────────────────────
@@ -225,9 +245,20 @@ void on_wifi_event(void*, esp_event_base_t, int32_t id, void* data) {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (id == WIFI_EVENT_STA_DISCONNECTED) {
         const auto* d = static_cast<const wifi_event_sta_disconnected_t*>(data);
-        if (g_sta_wanted)
-            ESP_LOGW(TAG, "Wi-Fi '%s': not joined (reason %u, signal %d dBm)", g_wifi_cfg.ssid.c_str(), d ? d->reason : 0,
-                     d ? d->rssi : 0);
+        if (g_sta_wanted) {
+            const unsigned reason = d ? d->reason : 0;
+            ESP_LOGW(TAG, "Wi-Fi '%s': not joined (reason %u, signal %d dBm)", g_wifi_cfg.ssid.c_str(), reason, d ? d->rssi : 0);
+            static unsigned last_reason = 0;
+            if (reason != last_reason || g_sta_connected) {  // once per kind of failure, not every retry
+                last_reason = reason;
+                const char* why = reason == 201 ? "the network was not found"
+                                  : (reason == 15 || reason == 2 || reason == 204 || reason == 202) ? "the password may be wrong"
+                                  : reason == 8 ? "it left the network"
+                                  : "the access point did not accept it";
+                eventlog::add(eventlog::Cat::Network, eventlog::Level::Warn, "Wi-Fi '%s' not joined: %s (reason %u)",
+                              g_wifi_cfg.ssid.c_str(), why, reason);
+            }
+        }
 
         g_sta_connected = false;
         g_connecting = false;
@@ -241,7 +272,7 @@ void on_wifi_event(void*, esp_event_base_t, int32_t id, void* data) {
         g_sta_started = false;
         g_connecting = false;
     } else if (id == WIFI_EVENT_AP_START) {
-        ESP_LOGI(TAG, "hotspot %s is up", g_name.c_str());
+        ESP_LOGI(TAG, "hotspot %s is up", hotspot_name().c_str());
         // In AP-only mode there is no STA_START: nothing to connect.
     } else if (id == WIFI_EVENT_STA_CONNECTED) {
         g_sta_connected = true;
@@ -329,11 +360,12 @@ void policy_locked(uint32_t boot) {
     if (!g_ap_on) {
         s.hotspot_ssid.clear();
     }
-    const bool changed = s.link != g_status.link || s.ip != g_status.ip || s.hotspot_ssid != g_status.hotspot_ssid ||
+    const bool changed = g_publish || s.link != g_status.link || s.ip != g_status.ip || s.hotspot_ssid != g_status.hotspot_ssid ||
                          s.wifi_ssid != g_status.wifi_ssid || s.wifi_enabled != g_status.wifi_enabled;
     const std::string keep_pw = g_status.hotspot_password;
     g_status = s;
     g_status.hotspot_password = keep_pw;
+    g_publish = false;
     if (changed) {
         ESP_LOGI(TAG, "link %s, IP %s", link_name(s.link), s.ip.empty() ? "-" : s.ip.c_str());
         if (g_on_change) {
@@ -361,6 +393,7 @@ void task(void*) {
     }
 }
 
+#if CONFIG_ETH_USE_ESP32_EMAC
 esp_err_t start_ethernet() {
     eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
     eth_esp32_emac_config_t emac_config = ETH_ESP32_EMAC_DEFAULT_CONFIG();
@@ -387,8 +420,26 @@ esp_err_t start_ethernet() {
     apply_to(g_eth_netif, g_cfg);
     return esp_eth_start(g_eth);
 }
+#else
+esp_err_t start_ethernet() { return ESP_ERR_NOT_SUPPORTED; }  // no Ethernet on this chip: Wi-Fi only
+#endif
 
 }  // namespace
+
+const char* chip_name() {
+    // CONFIG_IDF_TARGET "esp32p4" -> "ESP32-P4"
+    static char name[16] = "";
+    if (!name[0]) {
+        const char* t = CONFIG_IDF_TARGET;
+        size_t n = 0;
+        for (size_t i = 0; t[i] && n + 2 < sizeof(name); ++i) {
+            if (i == 5) name[n++] = '-';
+            name[n++] = static_cast<char>(std::toupper(static_cast<unsigned char>(t[i])));
+        }
+        name[n] = '\0';
+    }
+    return name;
+}
 
 const char* link_name(Link l) {
     switch (l) {
@@ -413,8 +464,9 @@ esp_err_t start(const std::string& name, std::function<void(const Status&)> on_c
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, ESP_EVENT_ANY_ID, on_ip_event, nullptr));
 
     err = start_ethernet();
-    if (err != ESP_OK) ESP_LOGE(TAG, "Ethernet failed: %s", esp_err_to_name(err));
-    xTaskCreatePinnedToCore(task, "net", 6144, nullptr, 6, &g_task, 1);
+    if (err == ESP_ERR_NOT_SUPPORTED) ESP_LOGI(TAG, "no Ethernet on this chip");
+    else if (err != ESP_OK) ESP_LOGE(TAG, "Ethernet failed: %s", esp_err_to_name(err));
+    xTaskCreatePinnedToCore(task, "net", 6144, nullptr, 6, &g_task, portNUM_PROCESSORS - 1);
     return ESP_OK;
 }
 
@@ -448,6 +500,18 @@ void join(const settings::Wifi& w) {
         g_sta_ip.clear();
         g_ap_on = false;
     }
+    wake();
+}
+
+void set_hotspot_open(bool open) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (open == g_hotspot_open) return;
+    g_hotspot_open = open;
+    if (g_ap_on) {
+        configure_ap();
+        ESP_LOGI(TAG, "hotspot %s", open ? "open (no deck to show a password on)" : "with a password (shown on the deck)");
+    }
+    g_publish = true;
     wake();
 }
 
@@ -523,6 +587,146 @@ void set_hostname(const std::string& host) {
 std::string hostname() {
     std::lock_guard<std::mutex> lock(g_mutex);
     return g_hostname;
+}
+
+namespace {
+
+// One UDP question and its answer (or nothing within `ms`).
+int udp_ask(uint32_t ip_be, uint16_t port, const uint8_t* q, size_t qlen, uint8_t* out, size_t cap, int ms) {
+    const int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (fd < 0) return -1;
+    timeval tv{ms / 1000, (ms % 1000) * 1000};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    sockaddr_in to{};
+    to.sin_family = AF_INET;
+    to.sin_port = htons(port);
+    to.sin_addr.s_addr = ip_be;
+    int n = -1;
+    if (sendto(fd, q, qlen, 0, reinterpret_cast<sockaddr*>(&to), sizeof(to)) == static_cast<int>(qlen))
+        n = static_cast<int>(recv(fd, out, cap, 0));
+    close(fd);
+    return n;
+}
+
+// A DNS name at `at` (with compression), as dotted text.
+bool dns_name(const uint8_t* m, int len, int at, std::string& out, int depth = 0) {
+    while (at < len && depth < 8) {
+        const uint8_t l = m[at];
+        if (l == 0) return true;
+        if ((l & 0xC0) == 0xC0) {
+            if (at + 1 >= len) return false;
+            return dns_name(m, len, ((l & 0x3F) << 8) | m[at + 1], out, depth + 1);
+        }
+        if (at + 1 + l > len) return false;
+        if (!out.empty()) out += '.';
+        out.append(reinterpret_cast<const char*>(m + at + 1), l);
+        at += 1 + l;
+    }
+    return false;
+}
+int dns_skip(const uint8_t* m, int len, int at) {
+    while (at < len) {
+        if (m[at] == 0) return at + 1;
+        if ((m[at] & 0xC0) == 0xC0) return at + 2;
+        at += 1 + m[at];
+    }
+    return len;
+}
+
+// The name the network's DNS server (usually the router, from the DHCP leases) gives the address.
+std::string reverse_dns(uint32_t ip_be, uint32_t dns_be) {
+    const uint8_t* b = reinterpret_cast<const uint8_t*>(&ip_be);
+    uint8_t q[64] = {0x4e, 0x44, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0};  // id, recursion desired, 1 question
+    size_t n = 12;
+    char label[4];
+    for (int i = 3; i >= 0; --i) {
+        const int l = std::snprintf(label, sizeof(label), "%u", b[i]);
+        q[n++] = static_cast<uint8_t>(l);
+        std::memcpy(q + n, label, l);
+        n += l;
+    }
+    for (const char* part : {"in-addr", "arpa"}) {
+        const size_t l = std::strlen(part);
+        q[n++] = static_cast<uint8_t>(l);
+        std::memcpy(q + n, part, l);
+        n += l;
+    }
+    q[n++] = 0;
+    const uint8_t tail[] = {0, 12, 0, 1};  // PTR, IN
+    std::memcpy(q + n, tail, 4);
+    n += 4;
+    uint8_t r[512];
+    const int len = udp_ask(dns_be, 53, q, n, r, sizeof(r), 1200);
+    if (len < 12 || r[0] != 0x4e || r[1] != 0x44 || (r[3] & 0x0F) != 0) return {};
+    const int answers = (r[6] << 8) | r[7];
+    int at = dns_skip(r, len, 12) + 4;
+    for (int i = 0; i < answers && at + 10 <= len; ++i) {
+        at = dns_skip(r, len, at);
+        if (at + 10 > len) break;
+        const int type = (r[at] << 8) | r[at + 1];
+        const int rdlen = (r[at + 8] << 8) | r[at + 9];
+        at += 10;
+        if (type == 12) {
+            std::string name;
+            if (dns_name(r, len, at, name) && !name.empty()) return name;
+        }
+        at += rdlen;
+    }
+    return {};
+}
+
+// The computer's own NetBIOS name (Windows, and Macs with file sharing on): a node status request.
+std::string netbios_name(uint32_t ip_be) {
+    uint8_t q[50] = {0x4e, 0x42, 0x00, 0x00, 0, 1, 0, 0, 0, 0, 0, 0, 0x20};
+    q[13] = 'C';
+    q[14] = 'K';  // "*" encoded, then 15 NULs as 'AA'
+    for (int i = 15; i < 45; ++i) q[i] = 'A';
+    q[45] = 0;
+    q[46] = 0;
+    q[47] = 0x21;  // NBSTAT
+    q[48] = 0;
+    q[49] = 1;     // IN
+    uint8_t r[600];
+    const int len = udp_ask(ip_be, 137, q, sizeof(q), r, sizeof(r), 800);
+    if (len < 57 || r[0] != 0x4e || r[1] != 0x42) return {};
+    int at = dns_skip(r, len, 12) + 10;  // name, type, class, ttl, rdlength
+    if (at >= len) return {};
+    const int count = r[at++];
+    for (int i = 0; i < count && at + 18 <= len; ++i, at += 18) {
+        const uint8_t suffix = r[at + 15];
+        const bool group = r[at + 16] & 0x80;
+        if (suffix != 0x00 || group) continue;  // the workstation name
+        std::string name(reinterpret_cast<const char*>(r + at), 15);
+        while (!name.empty() && name.back() == ' ') name.pop_back();
+        if (!name.empty()) return name;
+    }
+    return {};
+}
+
+}  // namespace
+
+Peer describe(const std::string& ip) {
+    Peer p;
+    esp_ip4_addr_t a{};
+    if (esp_netif_str_to_ip4(ip.c_str(), &a) != ESP_OK) return p;
+    // The DNS server of the link we are on.
+    esp_netif_t* netif = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        netif = g_eth_link && !g_eth_ip.empty() ? g_eth_netif : g_sta_netif;
+    }
+    esp_netif_dns_info_t dns{};
+    if (netif && esp_netif_get_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns) == ESP_OK && dns.ip.type == ESP_IPADDR_TYPE_V4 &&
+        dns.ip.u_addr.ip4.addr != 0) {
+        std::string name = reverse_dns(a.addr, dns.ip.u_addr.ip4.addr);
+        if (!name.empty()) {
+            p.hostname = name;
+            const size_t dot = name.find('.');  // "MacBookPro.lan" -> "MacBookPro"
+            p.name = dot == std::string::npos ? name : name.substr(0, dot);
+        }
+    }
+    if (p.name.empty()) p.name = netbios_name(a.addr);
+    return p;
 }
 
 int wifi_rssi() {

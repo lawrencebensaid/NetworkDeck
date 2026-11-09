@@ -1,6 +1,13 @@
 dependencies:
   espressif/mdns: "^1.15.1"
-  # Wi-Fi through the P4-NANO's co-processor over SDIO, with the esp_wifi API proxied to it.
-  # The board's co-processor is an ESP32-C5 running esp-hosted 2.12.9: the host side must match.
-  espressif/esp_wifi_remote: "^1.6.5"
-  espressif/esp_hosted: "2.12.9"
+  # On the P4 (no radio): Wi-Fi through the P4-NANO's co-processor over SDIO, with the esp_wifi API
+  # proxied to it. The board's co-processor is an ESP32-C5 running esp-hosted 2.12.9: the host side
+  # must match. Chips with their own Wi-Fi (C6, S3) use it directly.
+  espressif/esp_wifi_remote:
+    version: "^1.6.5"
+    rules:
+      - if: "target == esp32p4"
+  espressif/esp_hosted:
+    version: "2.12.9"
+    rules:
+      - if: "target == esp32p4"

@@ -30,8 +30,12 @@ bool host_connected();
 struct Host {
     std::string ip;
     uint32_t seconds = 0;
+    std::string name, hostname;  // the computer's name (set_host_info), or empty
 };
 Host host();
+// What is known of the computer at `ip` (looked up when it connects: net::describe). Ignored if another
+// host holds the dock by then.
+void set_host_info(const std::string& ip, const std::string& name, const std::string& hostname);
 
 // Wire these to usb_bridge's callbacks.
 void deck_attached(const usb_bridge::DeckInfo& info);

@@ -44,6 +44,7 @@ Config g_config;
 std::mutex g_mutex;  // guards g_slot and g_child, and keeps Conns alive while others send on them
 Slot g_slot;
 int64_t g_host_since = 0;  // esp_timer time the current host connected
+std::string g_host_name, g_host_hostname;
 cora::ChildInfo g_child;
 std::atomic<uint8_t> g_conn_no{0};
 std::atomic<bool> g_paused{false};
@@ -253,7 +254,11 @@ void listener_task(void* arg) {
                 c = new Conn(fd, port, ip, ++g_conn_no);
                 if (g_slot.dock) shutdown(g_slot.dock->fd, SHUT_RDWR);  // same host reconnecting
                 host_new = g_slot.ip == 0;
-                if (host_new) g_host_since = esp_timer_get_time();
+                if (host_new) {
+                    g_host_since = esp_timer_get_time();
+                    g_host_name.clear();
+                    g_host_hostname.clear();
+                }
                 g_slot.ip = ip;
                 g_slot.dock = c;
             } else if (port == cora::Port::Child && g_slot.ip == ip && g_child.attached) {
@@ -269,7 +274,7 @@ void listener_task(void* arg) {
         }
         if (host_new && g_config.on_host_change) g_config.on_host_change(true);
         if (xTaskCreatePinnedToCore(conn_task, port == cora::Port::Dock ? "dock_conn" : "deck_conn", 6144, c, 8,
-                                    nullptr, 1) != pdPASS) {
+                                    nullptr, portNUM_PROCESSORS - 1) != pdPASS) {
             ESP_LOGE(TAG, "no memory for connection task");
             std::lock_guard<std::mutex> lock(g_mutex);
             if (g_slot.dock == c) g_slot.dock = nullptr;
@@ -288,8 +293,8 @@ void send_plug_event_locked() {
 
 void start(const Config& config) {
     g_config = config;
-    xTaskCreatePinnedToCore(listener_task, "dock_listen", 4096, reinterpret_cast<void*>(cora::Port::Dock), 7, nullptr, 1);
-    xTaskCreatePinnedToCore(listener_task, "deck_listen", 4096, reinterpret_cast<void*>(cora::Port::Child), 7, nullptr, 1);
+    xTaskCreatePinnedToCore(listener_task, "dock_listen", 4096, reinterpret_cast<void*>(cora::Port::Dock), 7, nullptr, portNUM_PROCESSORS - 1);
+    xTaskCreatePinnedToCore(listener_task, "deck_listen", 4096, reinterpret_cast<void*>(cora::Port::Child), 7, nullptr, portNUM_PROCESSORS - 1);
 }
 
 bool host_connected() {
@@ -303,7 +308,16 @@ Host host() {
     if (!g_slot.ip) return h;
     h.ip = ip_str(g_slot.ip);
     h.seconds = static_cast<uint32_t>((esp_timer_get_time() - g_host_since) / 1000000);
+    h.name = g_host_name;
+    h.hostname = g_host_hostname;
     return h;
+}
+
+void set_host_info(const std::string& ip, const std::string& name, const std::string& hostname) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_slot.ip || ip_str(g_slot.ip) != ip) return;
+    g_host_name = name;
+    g_host_hostname = hostname;
 }
 
 void deck_attached(const usb_bridge::DeckInfo& info) {

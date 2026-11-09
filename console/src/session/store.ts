@@ -4,7 +4,7 @@
  */
 import { reactive } from "vue";
 
-import { api, whenSignedOut, type AuthState, type Deck, type Status } from "./api.ts";
+import { api, whenSignedOut, type AuthState, type Deck, type Status, type SystemInfo } from "./api.ts";
 
 export type Phase = "checking" | "setup" | "signed-out" | "signed-in" | "unreachable";
 
@@ -14,6 +14,7 @@ export const store = reactive({
   auth: null as AuthState | null,
   status: null as Status | null,
   deck: null as Deck | null,
+  system: null as SystemInfo | null,
   lastSeen: 0,
 });
 
@@ -33,6 +34,19 @@ async function pollStatus() {
   }
 }
 
+/* Ask for the deck now (the live view does when it is waiting for the rest of a page of keys). */
+export function refreshDeck() {
+  void pollDeck();
+}
+
+async function pollSystem() {
+  try {
+    store.system = await api.system();
+  } catch {
+    /* as above */
+  }
+}
+
 async function pollDeck() {
   try {
     store.deck = await api.deck();
@@ -46,7 +60,9 @@ function startPolling() {
   stopPolling();
   void pollStatus();
   void pollDeck();
+  void pollSystem();
   timers.push(window.setInterval(pollStatus, 4000));
+  timers.push(window.setInterval(pollSystem, 10000));
   timers.push(window.setInterval(pollDeck, 350));
 }
 

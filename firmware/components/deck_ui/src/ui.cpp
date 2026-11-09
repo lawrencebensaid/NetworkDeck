@@ -1,6 +1,7 @@
 #include "deck_ui/ui.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <vector>
 
@@ -21,7 +22,7 @@ bool parse_ip(const std::string& s, Ip4& out) {
 }
 
 // Greedy word wrap to `max_w`; words wider than a line are split between characters, preferring a
-// break after '.', '-' or ':' (addresses, names).
+// break after '.', '-' or ':' (addresses, names), then before a capital ("Network|Deck").
 std::vector<std::string> wrap(const std::string& text, const Font& f, int max_w) {
     std::vector<std::string> words, lines;
     std::string w;
@@ -44,9 +45,13 @@ std::vector<std::string> wrap(const std::string& text, const Font& f, int max_w)
                 if (word[i - 1] == '.' || word[i - 1] == '-' || word[i - 1] == ':') cut = i | (1u << 30);
             }
             size_t at = cut & ~(1u << 30);
-            // prefer the last punctuation break if there was one in range
+            // prefer the last punctuation break if there was one in range, else a camelCase one
+            // ("Network|Deck")
+            bool found = false;
             for (size_t i = at; i > 1; --i)
-                if (word[i - 1] == '.' || word[i - 1] == '-' || word[i - 1] == ':') { at = i; break; }
+                if (word[i - 1] == '.' || word[i - 1] == '-' || word[i - 1] == ':') { at = i; found = true; break; }
+            for (size_t i = at; !found && i > 1; --i)
+                if (std::islower(static_cast<unsigned char>(word[i - 1])) && std::isupper(static_cast<unsigned char>(word[i]))) { at = i; break; }
             if (at == 0) at = 1;
             if (!line.empty()) { lines.push_back(line); line.clear(); }
             lines.push_back(word.substr(0, at));
@@ -79,10 +84,25 @@ void label_value(Canvas& c, const std::string& label, const std::string& value, 
     const int w = c.width();
     c.text_centered(kSmallFont, w / 2, w / 9, label, color::kLabel);
     const Font& f = Canvas::fit(value, w - 6);
-    const Font& use = &f == &kLargeFont ? kMediumFont : f;  // values stay at most medium
-    auto lines = wrap_value(value, use, w - 6);
-    if (lines.size() > 2) lines = wrap_value(value, kSmallFont, w - 6);
-    centered_lines(c, lines, lines.size() > 2 ? kSmallFont : use, w / 3, w - w / 12, value_color);
+    const Font* use = &f == &kLargeFont ? &kMediumFont : &f;  // values stay at most medium
+    // Smaller rather than a word broken in two ("NetworkDec / k"), or more than two lines.
+    auto words_fit = [&](const Font& font) {
+        size_t at = 0;
+        while (at < value.size()) {
+            size_t end = value.find(' ', at);
+            if (end == std::string::npos) end = value.size();
+            if (Canvas::text_width(font, value.substr(at, end - at)) > w - 6) return false;
+            at = end + 1;
+        }
+        return true;
+    };
+    if (!words_fit(*use)) use = &kSmallFont;
+    auto lines = wrap_value(value, *use, w - 6);
+    if (lines.size() > 2 && use != &kSmallFont) {
+        use = &kSmallFont;
+        lines = wrap_value(value, *use, w - 6);
+    }
+    centered_lines(c, lines, *use, w / 3, w - w / 12, value_color);
 }
 
 void pill(Canvas& c, Rgb bg, const std::string& text, const Font& f, Rgb fg) {
@@ -461,7 +481,10 @@ void Ui::render(int key, Canvas& c) const {
                         net_.link == "Wi-Fi" ? color::kGreen : color::kWhite);
             break;
         case Role::Qr:
-            if (hotspot_.active) c.qr("WIFI:T:WPA;S:" + hotspot_.ssid + ";P:" + hotspot_.password + ";;", 0, 0, k);
+            if (hotspot_.active)
+                c.qr(hotspot_.password.empty() ? "WIFI:T:nopass;S:" + hotspot_.ssid + ";;"
+                                               : "WIFI:T:WPA;S:" + hotspot_.ssid + ";P:" + hotspot_.password + ";;",
+                     0, 0, k);
             break;
         case Role::HotspotName:
             if (hotspot_.active) label_value(c, "1. Join", hotspot_.ssid, color::kWhite);
@@ -469,7 +492,7 @@ void Ui::render(int key, Canvas& c) const {
             else centered_lines(c, {"Starting", "hotspot..."}, kSmallFont, 0, k, color::kLabel);
             break;
         case Role::HotspotPassword:
-            if (hotspot_.active) label_value(c, "Password", hotspot_.password, color::kWhite);
+            if (hotspot_.active) label_value(c, "Password", hotspot_.password.empty() ? "None" : hotspot_.password, color::kWhite);
             break;
         case Role::HotspotUrl:
             if (hotspot_.active) label_value(c, "2. Open", hotspot_.url, color::kWhite);

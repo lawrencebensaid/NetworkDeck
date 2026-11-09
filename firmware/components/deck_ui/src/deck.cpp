@@ -6,7 +6,10 @@
 #include <utility>
 #include <vector>
 
+#include "soc/soc_caps.h"
+#if SOC_JPEG_CODEC_SUPPORTED
 #include "driver/jpeg_encode.h"
+#endif
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -34,7 +37,8 @@ Callbacks g_cb;
 std::mutex g_mutex;  // guards everything below
 std::unique_ptr<Ui> g_ui;
 const Model* g_model = nullptr;
-uint16_t g_pid = 0;  // the attached Elgato device, also one without dock screens
+uint16_t g_pid = 0;
+int64_t g_last_key_write = 0;  // when the host last changed a key (esp_timer), for deck_json's "quiet_ms"  // the attached Elgato device, also one without dock screens
 NetInfo g_net;
 Hotspot g_hotspot;
 bool g_host = false;
@@ -61,10 +65,12 @@ SemaphoreHandle_t g_answer = nullptr;
 SemaphoreHandle_t g_confirm_lock = nullptr;
 TaskHandle_t g_task = nullptr;
 
+#if SOC_JPEG_CODEC_SUPPORTED
 jpeg_encoder_handle_t g_jpeg = nullptr;
 uint8_t* g_jpeg_in = nullptr;
 uint8_t* g_jpeg_out = nullptr;
 size_t g_jpeg_in_cap = 0, g_jpeg_out_cap = 0;
+#endif
 
 bool owns_locked() { return g_model && (!g_host || g_prompt.active); }
 
@@ -84,6 +90,9 @@ bool encode(const Model& m, const Canvas& key, std::vector<uint8_t>& out) {
         out = bmp(m, px);
         return true;
     }
+#if !SOC_JPEG_CODEC_SUPPORTED
+    return false;  // gen2 decks need JPEG: only with the hardware encoder (the P4) so far
+#else
     if (!g_jpeg) {
         jpeg_encode_engine_cfg_t ecfg{};
         ecfg.timeout_ms = 100;
@@ -113,6 +122,7 @@ bool encode(const Model& m, const Canvas& key, std::vector<uint8_t>& out) {
         return false;
     out.assign(g_jpeg_out, g_jpeg_out + size);
     return true;
+#endif
 }
 
 // Draws every key whose image changed. Rendering happens under the lock; USB writes outside it.
@@ -204,7 +214,7 @@ void start(const Callbacks& cb) {
     g_events = xQueueCreate(8, sizeof(UiEvent));
     g_answer = xSemaphoreCreateBinary();
     g_confirm_lock = xSemaphoreCreateMutex();
-    xTaskCreatePinnedToCore(task, "deck_ui", 16384, nullptr, 5, &g_task, 1);
+    xTaskCreatePinnedToCore(task, "deck_ui", 16384, nullptr, 5, &g_task, portNUM_PROCESSORS - 1);
 }
 
 void deck_attached(uint16_t pid) {
@@ -352,6 +362,7 @@ void host_output(const uint8_t* report, size_t len) {
     k.building.clear();
     k.has_color = false;
     k.version = ++g_version_seq;
+    g_last_key_write = esp_timer_get_time();
 }
 
 void host_feature(const uint8_t* report, size_t len) {
@@ -365,6 +376,7 @@ void host_feature(const uint8_t* report, size_t len) {
     k.has_color = true;
     k.color = c;
     k.version = ++g_version_seq;
+    g_last_key_write = esp_timer_get_time();
 }
 
 void observe_input(const uint8_t* report, size_t len) {
@@ -418,6 +430,11 @@ std::string deck_json() {
     }
     if (!g_model) return j + "}";
     const bool dock = owns_locked();
+    {
+        // How long the keys have been still: the page shows a new page of keys once it has all of it.
+        const int64_t quiet = g_last_key_write ? (esp_timer_get_time() - g_last_key_write) / 1000 : 1000000;
+        j += ",\"quiet_ms\":" + std::to_string(quiet > 1000000 ? 1000000 : quiet);
+    }
     j += ",\"keys\":[";
     for (int k = 0; k < g_model->keys(); ++k) {
         char b[64];

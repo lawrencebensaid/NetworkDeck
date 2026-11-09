@@ -17,6 +17,12 @@ import { store } from "../session/store.ts"
 
 const RELEASES = "https://github.com/lawrencebensaid/NetworkDeck/releases/latest"
 const PROJECT = "deck32" /* esp_app_desc_t.project_name of this firmware */
+/* esp_image_header_t.chip_id (byte 12) of the chips there are builds for */
+const CHIP_IDS: Record<number, string> = { 13: "ESP32-C6", 9: "ESP32-S3", 18: "ESP32-P4", 23: "ESP32-C5" }
+
+/* Release files are named networkdeck-<chip>-v<version>[-full].bin: the one this dock takes. */
+const chipTag = computed(() => (store.system?.chip ?? "ESP32-P4").toLowerCase().replace("-", ""))
+const fileHint = computed(() => `networkdeck-${chipTag.value}-v<version>.bin`)
 
 const file = ref<File | null>(null)
 const version = ref("")
@@ -40,11 +46,17 @@ async function inspect(f: File) {
   const head = new Uint8Array(await f.slice(0, 256).arrayBuffer())
   const view = new DataView(head.buffer)
   if (f.name.endsWith("-full.bin")) {
-    problem.value = "That is the image for a first install over USB. Use the one without -full."
+    problem.value = `That is the image for a first install over USB. Use ${fileHint.value}, without -full.`
     return
   }
   if (head.length < 112 || head[0] !== 0xe9 || view.getUint32(32, true) !== 0xabcd5432) {
-    problem.value = "This isn't a firmware image. Use networkdeck-<version>.bin from a release."
+    problem.value = `This isn't a firmware image. Use ${fileHint.value} from a release.`
+    return
+  }
+  const chip = CHIP_IDS[view.getUint16(12, true)] ?? "another chip"
+  const mine = store.system?.chip
+  if (mine && chip !== mine) {
+    problem.value = `This image is for the ${chip}; this dock is an ${mine}. Use ${fileHint.value}.`
     return
   }
   const project = cstr(head.subarray(80, 112))
@@ -88,13 +100,14 @@ async function install() {
 }
 
 const size = (n: number) => `${(n / 1024 / 1024).toFixed(1)} MB`
+import { versionKind, versionLabel } from "@/lib/version"
 </script>
 
 <template>
   <div class="flex flex-col gap-5">
     <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
-      <dt class="text-muted-foreground">Build</dt>
-      <dd class="font-mono">{{ store.status?.build ?? "–" }}</dd>
+      <dt class="text-muted-foreground">Version</dt>
+      <dd><span class="font-mono">{{ versionLabel(store.status?.build) }}</span> <span class="text-muted-foreground">· {{ versionKind(store.status?.build) }}</span></dd>
       <dt class="text-muted-foreground">Reported to the app</dt>
       <dd class="font-mono">{{ store.status?.firmware ?? "–" }}</dd>
     </dl>
@@ -129,20 +142,20 @@ const size = (n: number) => `${(n / 1024 / 1024).toFixed(1)} MB`
         <div class="min-w-0 flex-1">
           <div class="truncate font-medium">{{ file.name }}</div>
           <div v-if="problem" class="text-destructive">{{ problem }}</div>
-          <div v-else-if="version" class="text-muted-foreground">Version {{ version }} · {{ size(file.size) }}</div>
+          <div v-else-if="version" class="text-muted-foreground">{{ versionLabel(version) }} · {{ versionKind(version) }} · {{ size(file.size) }}</div>
         </div>
         <Button v-if="!busy" variant="ghost" size="icon-sm" aria-label="Choose another file" @click="clear"><X /></Button>
       </div>
       <input ref="input" type="file" accept=".bin" class="sr-only" tabindex="-1" aria-hidden="true" @change="($event.target as HTMLInputElement).files?.[0] && inspect(($event.target as HTMLInputElement).files![0]!)" />
       <p class="text-xs text-muted-foreground">
-        Download <code>networkdeck-&lt;version&gt;.bin</code> from the
-        <a :href="RELEASES" target="_blank" rel="noopener" class="underline underline-offset-2 hover:text-foreground">latest release</a>.
-        If the new firmware does not start, the dock goes back to this one.
+        This dock is an {{ store.system?.chip ?? "ESP32-P4" }}: download <code class="font-medium text-foreground">{{ fileHint }}</code>
+        from the <a :href="RELEASES" target="_blank" rel="noopener" class="underline underline-offset-2 hover:text-foreground">latest release</a>,
+        not the <code>-full</code> file and not one for another chip. If the new firmware does not start, the dock goes back to this one.
       </p>
     </div>
     <Progress v-if="stage === 'uploading'" :model-value="progress" />
     <p v-if="stage === 'confirming' && !store.viaHotspot" class="flex items-center gap-2 text-sm" role="status"><Spinner class="size-4" /> Checking it. Then confirm on the Stream Deck: press ✓.</p>
     <p v-if="stage === 'restarting'" class="flex items-center gap-2 text-sm" role="status"><Spinner class="size-4" /> Restarting with the new firmware…</p>
-    <Button :disabled="!file || !!problem || !version || busy" @click="install">{{ version ? `Install ${version}` : "Install" }}</Button>
+    <Button :disabled="!file || !!problem || !version || busy" @click="install">{{ version ? `Install ${versionLabel(version)}` : "Install" }}</Button>
   </div>
 </template>

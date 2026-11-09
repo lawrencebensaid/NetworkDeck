@@ -8,3 +8,6 @@ firmware/build/
 firmware/dependencies.lock
 firmware/test/host/build/
 firmware/third_party/
+sdkconfig.*
+!sdkconfig.defaults*
+firmware/build-*/

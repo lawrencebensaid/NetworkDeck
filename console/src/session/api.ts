@@ -43,6 +43,7 @@ export interface Status {
   host: boolean;
   host_ip: string; /* the computer running the Stream Deck app, empty when none */
   host_seconds: number; /* connected this long */
+  host_name?: string; /* the computer's name: the router's reverse DNS, else its NetBIOS name */
   deck: string;
 }
 
@@ -55,6 +56,8 @@ export interface Deck {
   attached: boolean;
   pid?: number; /* USB product id */
   live?: boolean; /* false: a deck the dock bridges but can't show the keys of */
+  finish?: "black" | "white" | ""; /* as chosen for this deck (by serial); empty: not chosen */
+  quiet_ms?: number; /* since the Stream Deck app last changed a key */
   model?: string;
   cols?: number;
   rows?: number;
@@ -67,6 +70,75 @@ export interface Deck {
   usb_rev?: string; /* bcdDevice, as 1.00 */
   keys?: DeckKey[];
   pressed?: number[];
+}
+
+export interface SystemInfo {
+  chip: string; /* "ESP32-P4" */
+  revision: string;
+  cores: number;
+  cpu_mhz: number;
+  flash_bytes: number;
+  psram_bytes: number;
+  board: string;
+  wifi_via: string; /* the P4's Wi-Fi co-processor, empty on chips with their own Wi-Fi */
+  usb_host: boolean;
+  ethernet: boolean;
+  matter: boolean;
+  serial: string;
+  mac_base: string;
+  mac_ethernet: string;
+  mac_wifi: string;
+  idf: string;
+  firmware: string;
+  partition: string;
+  uptime: number;
+  reset_reason: string;
+  heap_free: number;
+  heap_min: number;
+  heap_total: number;
+  psram_free: number;
+  temp_c: number; /* -1000 when not read */
+  warm_c: number;
+  hot_c: number;
+  led: boolean;
+  led_gpio: number;
+  default_led_gpio: number;
+  usb_power_gpio: number;
+  usb_data_pins: string; /* the chip's fixed USB data pins, in words; empty without USB host */
+}
+
+export interface ApiKeyInfo {
+  id: string;
+  name: string;
+  created: number; /* Unix time, 0 if the dock's clock wasn't set */
+  last_used: number; /* Unix time since the dock started, 0 if not used */
+}
+
+export interface ApiKeyMade extends Result {
+  id?: string;
+  name?: string;
+  key?: string; /* shown once */
+}
+
+export type LogCategory = "system" | "update" | "network" | "connection" | "deck" | "security" | "matter";
+
+export interface LogRecord {
+  s: number; /* sequence number */
+  b: number; /* start (boot) number */
+  t: number; /* Unix time, 0 before the clock was set */
+  u: number; /* seconds since that start */
+  c: LogCategory;
+  l: "info" | "warn" | "error";
+  m: string;
+}
+
+export interface LogPage {
+  capacity: number;
+  kept: number;
+  boot: number; /* the current start */
+  now: number; /* the dock's Unix time, 0 if not set */
+  uptime: number; /* seconds since this start */
+  records: LogRecord[]; /* newest first */
 }
 
 export interface WifiNetwork {
@@ -134,6 +206,16 @@ export const api = {
   wifiEnabled: (on: boolean) => post("/api/wifi/enabled", { value: on ? "1" : "0" }),
   wifiForget: () => post("/api/wifi/forget"),
   hostname: (value: string) => post("/api/hostname", { value }),
+  finish: (value: "black" | "white") => post("/api/deck/finish", { value }),
+  system: () => get<SystemInfo>("/api/system"),
+  setSystem: (data: Record<string, string>) => post("/api/system", data),
+  restart: () => post("/api/restart"),
+  rest: () => get<{ enabled: boolean }>("/api/rest"),
+  setRest: (on: boolean) => post("/api/rest", { value: on ? "1" : "0" }),
+  keys: () => get<ApiKeyInfo[]>("/api/keys"),
+  keyCreate: (name: string) => post("/api/keys", { name }) as Promise<ApiKeyMade>,
+  keyDelete: (id: string) => post("/api/keys/delete", { id }),
+  log: (before = 0, limit = 300) => get<LogPage>(`/api/log?before=${before}&limit=${limit}`),
   trace: async () => {
     const r = await fetch("/api/trace", { credentials: "same-origin", cache: "no-store" });
     if (r.status === 401) {
