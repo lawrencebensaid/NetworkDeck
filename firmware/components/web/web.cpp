@@ -220,6 +220,29 @@ esp_err_t scan_work(httpd_req_t* req) {
     return send_json(req, out);
 }
 
+esp_err_t brightness_post(httpd_req_t* req) {
+    if (!allowed(req, true)) return ESP_OK;
+    std::string body;
+    if (!read_form(req, body)) return result(req, false, "Bad request", "400 Bad Request");
+    const std::string v = field(body, "value");
+    char* end = nullptr;
+    const long n = std::strtol(v.c_str(), &end, 10);
+    if (v.empty() || *end || n < 0 || n > 100) return result(req, false, "Brightness is 0 to 100");
+    if (g_hooks.set_brightness) g_hooks.set_brightness(static_cast<int>(n));
+    return result(req, true, "Brightness " + std::to_string(n) + "%");
+}
+
+esp_err_t matter_get(httpd_req_t* req) {
+    if (!allowed(req, false)) return ESP_OK;
+    return send_json(req, g_hooks.matter_json ? g_hooks.matter_json() : "{\"running\":false}");
+}
+
+esp_err_t matter_open_post(httpd_req_t* req) {
+    if (!allowed(req, true)) return ESP_OK;
+    if (!g_hooks.matter_open || !g_hooks.matter_open()) return result(req, false, "Matter is not running");
+    return result(req, true, "Pairing is open for 15 minutes");
+}
+
 esp_err_t trace_get(httpd_req_t* req) {
     if (!allowed(req, false)) return ESP_OK;
     const std::string t = g_hooks.trace ? g_hooks.trace() : "";
@@ -304,6 +327,12 @@ void restart_soon(void*) {
     esp_restart();
 }
 
+esp_err_t matter_unpair_work(httpd_req_t* req) {
+    if (!confirmed(req, "Remove from Matter?")) return result(req, false, "Not confirmed on the deck");
+    if (!g_hooks.matter_unpair || !g_hooks.matter_unpair()) return result(req, false, "Matter is not running");
+    return result(req, true, "Removed from every controller, restarting");
+}
+
 // The image is written to the spare slot first; only after it validates and is confirmed on the deck
 // does the dock boot from it. The bootloader rolls back if it fails to start its network.
 esp_err_t update_work(httpd_req_t* req) {
@@ -371,6 +400,7 @@ esp_err_t setup_post(httpd_req_t* req) {
 }
 // A scan takes a few seconds: on the worker, so the status and deck polls keep answering meanwhile.
 esp_err_t scan_get(httpd_req_t* req) { return allowed(req, false) ? run_async(req, scan_work) : ESP_OK; }
+esp_err_t matter_unpair_post(httpd_req_t* req) { return allowed(req, true) ? run_async(req, matter_unpair_work) : ESP_OK; }
 esp_err_t wifi_post(httpd_req_t* req) { return allowed(req, true) ? run_async(req, wifi_work) : ESP_OK; }
 esp_err_t network_post(httpd_req_t* req) { return allowed(req, true) ? run_async(req, network_work) : ESP_OK; }
 esp_err_t update_post(httpd_req_t* req) { return allowed(req, true) ? run_async(req, update_work) : ESP_OK; }
@@ -382,7 +412,7 @@ esp_err_t start(const Hooks& hooks) {
     auth::load();
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = 8192;
-    cfg.max_uri_handlers = 20;
+    cfg.max_uri_handlers = 24;
     cfg.max_open_sockets = 7;
     cfg.recv_wait_timeout = 40;  // a confirmation on the deck can take up to 30 s
     cfg.send_wait_timeout = 40;
@@ -405,6 +435,10 @@ esp_err_t start(const Hooks& hooks) {
         {"/api/network", HTTP_POST, network_post, nullptr},
         {"/api/update", HTTP_POST, update_post, nullptr},
         {"/api/trace", HTTP_GET, trace_get, nullptr},
+        {"/api/deck/brightness", HTTP_POST, brightness_post, nullptr},
+        {"/api/matter", HTTP_GET, matter_get, nullptr},
+        {"/api/matter/open", HTTP_POST, matter_open_post, nullptr},
+        {"/api/matter/unpair", HTTP_POST, matter_unpair_post, nullptr},
     };
     for (const auto& u : uris) httpd_register_uri_handler(server, &u);
     ESP_LOGI(TAG, "web interface on port 80");

@@ -30,6 +30,10 @@ void set_network(const Network& n);
 Wifi wifi();
 void set_wifi(const Wifi& w);
 
+// Brightness of the dock's own screens on the deck, 0..100 (the Stream Deck app sets its own).
+int deck_brightness();
+void set_deck_brightness(int percent);
+
 // Erases network and Wi-Fi settings.
 void factory_reset();
 

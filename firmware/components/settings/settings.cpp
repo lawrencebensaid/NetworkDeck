@@ -15,6 +15,7 @@ constexpr char kNs[] = "deck32";
 std::mutex g_mutex;
 Network g_net;
 Wifi g_wifi;
+int g_brightness = 70;
 
 uint32_t pack(const Ip4& ip) { return (uint32_t(ip[0]) << 24) | (uint32_t(ip[1]) << 16) | (uint32_t(ip[2]) << 8) | ip[3]; }
 Ip4 unpack(uint32_t v) {
@@ -48,6 +49,8 @@ void load() {
     if (nvs_get_u32(h, "gw", &v) == ESP_OK) g_net.gateway = unpack(v);
     g_wifi.ssid = get_str(h, "ssid");
     g_wifi.password = get_str(h, "pass");
+    uint8_t b;
+    if (nvs_get_u8(h, "bright", &b) == ESP_OK && b <= 100) g_brightness = b;
     nvs_close(h);
     ESP_LOGI(TAG, "network %s, Wi-Fi %s", g_net.dhcp ? "DHCP" : "static", g_wifi.ssid.empty() ? "not set" : g_wifi.ssid.c_str());
 }
@@ -86,6 +89,23 @@ void set_wifi(const Wifi& w) {
     nvs_close(h);
 }
 
+int deck_brightness() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_brightness;
+}
+
+void set_deck_brightness(int percent) {
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_brightness = percent;
+    nvs_handle_t h;
+    if (nvs_open(kNs, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, "bright", static_cast<uint8_t>(percent));
+    nvs_commit(h);
+    nvs_close(h);
+}
+
 void factory_reset() {
     std::lock_guard<std::mutex> lock(g_mutex);
     nvs_handle_t h;
@@ -96,6 +116,7 @@ void factory_reset() {
     }
     g_net = Network{};
     g_wifi = Wifi{};
+    g_brightness = 70;
     ESP_LOGW(TAG, "factory reset: network and Wi-Fi settings erased");
 }
 

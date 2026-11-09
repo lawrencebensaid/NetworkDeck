@@ -45,7 +45,7 @@ onMounted(() => store.status?.wifi_available && scan())
   <div class="flex flex-col gap-4">
     <p v-if="!store.status?.wifi_available" class="text-sm text-muted-foreground">Wi-Fi is not available on this board.</p>
     <template v-else>
-      <p class="text-sm text-muted-foreground">Used when no Ethernet cable is connected.<template v-if="store.status?.wifi_ssid"> Saved: <strong class="text-foreground">{{ store.status.wifi_ssid }}</strong>.</template></p>
+      <p v-if="store.status?.wifi_ssid" class="text-sm text-muted-foreground">Saved: <strong class="text-foreground">{{ store.status.wifi_ssid }}</strong>.</p>
       <div class="flex items-center justify-between">
         <span class="text-sm font-medium">Networks</span>
         <Button variant="ghost" size="sm" :disabled="scanning" @click="scan">

@@ -28,6 +28,12 @@ struct Hooks {
     std::function<bool(const std::string& question)> confirm;
     std::function<void(const settings::Wifi&)> set_wifi;     // after confirmation
     std::function<void(const settings::Network&)> set_network;
+    std::function<void(int percent)> set_brightness;         // POST /api/deck/brightness: the dock's screens
+    // Matter: GET /api/matter, POST /api/matter/open (pairing for 15 minutes), POST /api/matter/unpair
+    // (after confirmation: leave every controller, restart).
+    std::function<std::string()> matter_json;
+    std::function<bool()> matter_open;
+    std::function<bool()> matter_unpair;
 };
 
 esp_err_t start(const Hooks& hooks);

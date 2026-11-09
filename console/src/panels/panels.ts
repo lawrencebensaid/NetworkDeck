@@ -1,10 +1,9 @@
-export type PanelId = "network" | "wifi" | "firmware" | "security" | "diagnostics";
+/* The panels the rail opens beside the deck. Settings and integrations are dialogs (see ConsoleView). */
+export type PanelId = "deck" | "matter" | "diagnostics";
 
 export const PANELS: Record<PanelId, { title: string }> = {
-  network: { title: "Network" },
-  wifi: { title: "Wi-Fi" },
-  firmware: { title: "Firmware" },
-  security: { title: "Password" },
+  deck: { title: "Stream Deck" },
+  matter: { title: "Matter" },
   diagnostics: { title: "Diagnostics" },
 };
 

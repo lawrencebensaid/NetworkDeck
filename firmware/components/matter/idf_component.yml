@@ -1,0 +1,5 @@
+dependencies:
+  # Espressif's Matter SDK. Fetched and patched by cmake/esp_matter.cmake (too large to vendor).
+  espressif/esp_matter:
+    version: "1.6.1"
+    override_path: "../../third_party/esp_matter"

@@ -44,6 +44,10 @@ export interface Deck {
   key_px?: number;
   transform?: string;
   source?: "app" | "dock";
+  brightness?: number; /* of the dock's own screens, 0..100 */
+  product?: string; /* USB product string */
+  serial?: string;
+  usb_rev?: string; /* bcdDevice, as 1.00 */
   keys?: DeckKey[];
   pressed?: number[];
 }
@@ -52,6 +56,15 @@ export interface WifiNetwork {
   ssid: string;
   rssi: number;
   secure: boolean;
+}
+
+export interface Matter {
+  running: boolean;
+  fabrics?: number; /* controllers it has been added to */
+  window_open?: boolean; /* a controller can add it now */
+  window_seconds?: number;
+  qr?: string; /* MT:… */
+  manual?: string; /* 11 digits */
 }
 
 export class SignedOut extends Error {}
@@ -93,6 +106,10 @@ export const api = {
   status: () => get<Status>("/api/status"),
   deck: () => get<Deck>("/api/deck"),
   scan: () => get<WifiNetwork[]>("/api/scan"),
+  brightness: (percent: number) => post("/api/deck/brightness", { value: String(percent) }),
+  matter: () => get<Matter>("/api/matter"),
+  matterOpen: () => post("/api/matter/open"),
+  matterUnpair: () => post("/api/matter/unpair"),
   trace: async () => {
     const r = await fetch("/api/trace", { credentials: "same-origin", cache: "no-store" });
     if (r.status === 401) {

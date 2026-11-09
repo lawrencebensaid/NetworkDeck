@@ -190,15 +190,27 @@ void on_wifi_event(void*, esp_event_base_t, int32_t id, void*) {
     wake();
 }
 
+// Matter runs over IPv6: an interface that is up gets its link-local address (SLAAC adds the rest).
+// On the IPv4 event, because that comes after the interface is up, with DHCP or a static address.
+void add_ip6_linklocal(esp_netif_t* netif, const char* what) {
+    if (esp_err_t e = esp_netif_create_ip6_linklocal(netif); e != ESP_OK)
+        ESP_LOGW(TAG, "%s: no IPv6 link-local address (%s)", what, esp_err_to_name(e));
+}
+
 void on_ip_event(void*, esp_event_base_t, int32_t id, void* data) {
     std::lock_guard<std::mutex> lock(g_mutex);
     const auto* ev = static_cast<ip_event_got_ip_t*>(data);
     if (id == IP_EVENT_ETH_GOT_IP) {
         g_eth_ip = ip_str(ev->ip_info.ip);
         ESP_LOGI(TAG, "Ethernet IP %s", g_eth_ip.c_str());
+        add_ip6_linklocal(g_eth_netif, "Ethernet");
     } else if (id == IP_EVENT_STA_GOT_IP) {
         g_sta_ip = ip_str(ev->ip_info.ip);
         ESP_LOGI(TAG, "Wi-Fi IP %s", g_sta_ip.c_str());
+        add_ip6_linklocal(g_sta_netif, "Wi-Fi");
+    } else if (id == IP_EVENT_GOT_IP6) {
+        const auto* ev6 = static_cast<ip_event_got_ip6_t*>(data);
+        ESP_LOGI(TAG, "IPv6 " IPV6STR, IPV62STR(ev6->ip6_info.ip));
     } else if (id == IP_EVENT_STA_LOST_IP) {
         g_sta_ip.clear();
     }

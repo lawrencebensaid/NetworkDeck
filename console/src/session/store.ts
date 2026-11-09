@@ -28,7 +28,7 @@ async function pollStatus() {
     store.status = await api.status();
     store.lastSeen = Date.now();
   } catch {
-    /* a moment without the dock (it may be changing network) is shown by the status bar */
+    /* a moment without the dock (it may be changing network) is shown by the network light */
   }
 }
 

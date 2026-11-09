@@ -33,6 +33,6 @@ async function change() {
     <div class="flex flex-col gap-1.5"><Label for="new">New password</Label><Input id="new" v-model="next" type="password" autocomplete="new-password" /><p class="text-xs text-muted-foreground">At least 8 characters.</p></div>
     <div class="flex flex-col gap-1.5"><Label for="rep">Repeat it</Label><Input id="rep" v-model="repeat" type="password" autocomplete="new-password" /></div>
     <Button type="submit" :disabled="!ok || busy" class="mt-1">Change password</Button>
-    <p class="mt-2 text-xs text-muted-foreground">Forgot it? A factory reset on the deck (hold the top-left and top-right keys for 10 seconds) clears it, along with the network settings.</p>
+    <p class="mt-2 text-xs text-muted-foreground">Forgot it? A factory reset on the deck (hold the top-left and top-right keys for 10 seconds) clears it, along with the network settings and Matter pairings.</p>
   </form>
 </template>

@@ -10,8 +10,24 @@ network, so your profiles and plugins run unchanged — no laptop next to the de
   deck) when there's nothing to join.
 - **On the deck** while no app is connected: IP address, network, firmware, DHCP/static, an on-deck
   static IP editor, and confirmations for changes made in the web interface.
-- **Web interface** at the dock's address: status, Wi-Fi, network settings, firmware upload with
-  automatic rollback.
+- **Web interface** at the dock's address, behind a password: the deck live in the middle (what the
+  app draws on each key, and which key is pressed), lights for the deck and the network in the top
+  bar, the deck's details and screen brightness, Matter, and the settings (network, Wi-Fi, firmware
+  upload with automatic rollback, password).
+- **Matter:** add the dock to Home Assistant, Apple Home or Google Home and every key is a button
+  there (press, release, long press), for automations — also while the Stream Deck app drives the
+  deck.
+
+## Matter
+
+Open **Integrations → Matter** in the web interface (or the Matter panel in the rail) and scan the QR code (in Home Assistant: **Add Matter device**
+in the companion app), or type the setup code. Each dock has its own random code. The dock is
+uncertified — it uses the Matter SDK's test attestation — so the app asks before adding it; with
+Google Home that needs a developer project for vendor `0xFFF1` / product `0x8000`.
+
+While the dock has no controller, pairing opens for 15 minutes at every start. **Open pairing** opens
+it again, also to add a second controller (say, Home Assistant next to Apple Home). The keys are endpoints 1 to
+15 on a Stream Deck MK.2, numbered from the top-left key the way you read.
 
 ## Install
 
@@ -26,7 +42,9 @@ Later updates: upload `networkdeck-<version>.bin` in the web interface.
 
 ## Build
 
-ESP-IDF v6.1. From `firmware/`: `idf.py build flash monitor`. Host tests (protocol core, HID parser,
+ESP-IDF v6.1. From `firmware/`: `idf.py build flash monitor`. The first configure downloads
+esp-matter 1.6.1 (10 MB, checked against a pinned SHA-256) into `firmware/third_party/` and patches it
+to share the network with the rest of the firmware: see `firmware/cmake/esp_matter.cmake`. Host tests (protocol core, HID parser,
 deck screens) run on the Mac or Linux:
 
 ```sh
@@ -41,6 +59,9 @@ draw, read keys, benchmark).
 Pull requests go into `develop`; merging `develop` into `main` releases when `VERSION` was raised
 (see `.github/workflows/firmware.yml` and `CHANGELOG.md`). CI runs on the self-hosted runner in the k3s
 cluster (`deploy/ci-runner/`).
+
+The web interface lives in `console/` (Vue): `npm run build:firmware` writes the gzipped page the
+firmware embeds; `ND_DEVICE=http://<ip> npm run dev` serves it with the API proxied to a dock.
 
 The USB host driver carries one fix for the
 P4's high-speed interrupt endpoints: `firmware/vendor/usb/DECK32_PATCH.md`.
