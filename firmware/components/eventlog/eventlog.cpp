@@ -139,8 +139,10 @@ const char* cat_name(Cat c) {
 void start() {
     if (g_queue) return;
     g_part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_ANY, "eventlog");
-    if (!g_part) {
-        // An older partition table (a dock updated over the air): the same place, registered here.
+    uint32_t flash_size = 0;
+    esp_flash_get_size(esp_flash_default_chip, &flash_size);
+    if (!g_part && flash_size >= kOffset + kSize) {
+        // An older partition table (a P4 dock updated over the air): the same place, registered here.
         const esp_err_t err = esp_partition_register_external(esp_flash_default_chip, kOffset, kSize, "eventlog",
                                                               ESP_PARTITION_TYPE_DATA,
                                                               static_cast<esp_partition_subtype_t>(0x40), &g_part);
@@ -149,6 +151,10 @@ void start() {
             g_part = nullptr;
             return;
         }
+    }
+    if (!g_part) {
+        ESP_LOGE(TAG, "no event log partition");
+        return;
     }
     {
         std::lock_guard<std::mutex> lock(g_mutex);

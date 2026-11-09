@@ -104,6 +104,9 @@ std::string random_password() {
 
 // ── Wi-Fi ───────────────────────────────────────────────────────────────────
 
+// The setup network: "NetworkDeck ESP32-P4", after the chip the firmware runs on.
+std::string hotspot_name() { return std::string("NetworkDeck ") + chip_name(); }
+
 void try_connect() {
     if (!g_sta_wanted || !g_sta_started || g_sta_connected || g_scanning) return;  // a connect aborts a scan
     g_last_try = now_ms();
@@ -124,18 +127,20 @@ bool wifi_init() {
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_err_t err = esp_wifi_init(&cfg);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Wi-Fi unavailable: %s (is the C6 running esp-hosted?)", esp_err_to_name(err));
+        ESP_LOGE(TAG, "Wi-Fi unavailable: %s (on the P4: is the co-processor running esp-hosted?)", esp_err_to_name(err));
         return false;
     }
     esp_wifi_set_storage(WIFI_STORAGE_RAM);
     // The C5 does 2.4 and 5 GHz: look for the saved network on both (a 5 GHz-only network is
     // otherwise never found).
+#if CONFIG_IDF_TARGET_ESP32P4 || CONFIG_SOC_WIFI_SUPPORT_5G
     wifi_band_mode_t band = WIFI_BAND_MODE_2G_ONLY;
     esp_wifi_get_band_mode(&band);
     if (band != WIFI_BAND_MODE_AUTO) {
         err = esp_wifi_set_band_mode(WIFI_BAND_MODE_AUTO);
         ESP_LOGI(TAG, "Wi-Fi bands: was %d, now 2.4 + 5 GHz (%s)", static_cast<int>(band), esp_err_to_name(err));
     }
+#endif
     return true;
 }
 
@@ -174,10 +179,11 @@ void wifi_mode(bool sta, bool ap) {
     }
     if (ap) {
         if (g_status.hotspot_password.empty()) g_status.hotspot_password = random_password();
-        g_status.hotspot_ssid = g_name;
+        const std::string ssid = hotspot_name();
+        g_status.hotspot_ssid = ssid;
         wifi_config_t ac{};
-        std::strncpy(reinterpret_cast<char*>(ac.ap.ssid), g_name.c_str(), sizeof(ac.ap.ssid) - 1);
-        ac.ap.ssid_len = static_cast<uint8_t>(g_name.size());
+        std::strncpy(reinterpret_cast<char*>(ac.ap.ssid), ssid.c_str(), sizeof(ac.ap.ssid) - 1);
+        ac.ap.ssid_len = static_cast<uint8_t>(ssid.size());
         std::strncpy(reinterpret_cast<char*>(ac.ap.password), g_status.hotspot_password.c_str(), sizeof(ac.ap.password) - 1);
         ac.ap.authmode = WIFI_AUTH_WPA2_PSK;
         ac.ap.max_connection = 4;
@@ -205,7 +211,7 @@ void wifi_mode(bool sta, bool ap) {
         try_connect();
     }
     ESP_LOGI(TAG, "Wi-Fi %s%s%s", sta ? "joining '" : "", sta ? (g_wifi_cfg.ssid + "'").c_str() : "",
-             ap ? (std::string(sta ? " + " : "") + "hotspot " + g_name).c_str() : "");
+             ap ? (std::string(sta ? " + " : "") + "hotspot " + hotspot_name()).c_str() : "");
 }
 
 // ── events ──────────────────────────────────────────────────────────────────
@@ -254,7 +260,7 @@ void on_wifi_event(void*, esp_event_base_t, int32_t id, void* data) {
         g_sta_started = false;
         g_connecting = false;
     } else if (id == WIFI_EVENT_AP_START) {
-        ESP_LOGI(TAG, "hotspot %s is up", g_name.c_str());
+        ESP_LOGI(TAG, "hotspot %s is up", hotspot_name().c_str());
         // In AP-only mode there is no STA_START: nothing to connect.
     } else if (id == WIFI_EVENT_STA_CONNECTED) {
         g_sta_connected = true;
@@ -374,6 +380,7 @@ void task(void*) {
     }
 }
 
+#if CONFIG_ETH_USE_ESP32_EMAC
 esp_err_t start_ethernet() {
     eth_mac_config_t mac_config = ETH_MAC_DEFAULT_CONFIG();
     eth_esp32_emac_config_t emac_config = ETH_ESP32_EMAC_DEFAULT_CONFIG();
@@ -400,8 +407,26 @@ esp_err_t start_ethernet() {
     apply_to(g_eth_netif, g_cfg);
     return esp_eth_start(g_eth);
 }
+#else
+esp_err_t start_ethernet() { return ESP_ERR_NOT_SUPPORTED; }  // no Ethernet on this chip: Wi-Fi only
+#endif
 
 }  // namespace
+
+const char* chip_name() {
+    // CONFIG_IDF_TARGET "esp32p4" -> "ESP32-P4"
+    static char name[16] = "";
+    if (!name[0]) {
+        const char* t = CONFIG_IDF_TARGET;
+        size_t n = 0;
+        for (size_t i = 0; t[i] && n + 2 < sizeof(name); ++i) {
+            if (i == 5) name[n++] = '-';
+            name[n++] = static_cast<char>(std::toupper(static_cast<unsigned char>(t[i])));
+        }
+        name[n] = '\0';
+    }
+    return name;
+}
 
 const char* link_name(Link l) {
     switch (l) {
@@ -426,7 +451,8 @@ esp_err_t start(const std::string& name, std::function<void(const Status&)> on_c
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, ESP_EVENT_ANY_ID, on_ip_event, nullptr));
 
     err = start_ethernet();
-    if (err != ESP_OK) ESP_LOGE(TAG, "Ethernet failed: %s", esp_err_to_name(err));
+    if (err == ESP_ERR_NOT_SUPPORTED) ESP_LOGI(TAG, "no Ethernet on this chip");
+    else if (err != ESP_OK) ESP_LOGE(TAG, "Ethernet failed: %s", esp_err_to_name(err));
     xTaskCreatePinnedToCore(task, "net", 6144, nullptr, 6, &g_task, 1);
     return ESP_OK;
 }

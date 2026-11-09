@@ -7,11 +7,25 @@
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <utility>
 
 #include "deck_ui/deck.hpp"
 #include "dock_server.hpp"
 #include "esp_app_desc.h"
+#include "esp_chip_info.h"
+#include "esp_flash.h"
+#include "esp_heap_caps.h"
+#include "esp_idf_version.h"
 #include "esp_log.h"
+#include "esp_mac.h"
+#include "esp_timer.h"
+#include "driver/gpio.h"
+#include "driver/temperature_sensor.h"
+#include "led.hpp"
+#include "soc/soc_caps.h"
+#if CONFIG_SPIRAM
+#include "esp_psram.h"
+#endif
 #include "esp_netif_sntp.h"
 #include "eventlog.hpp"
 #include "nvs.h"
@@ -78,6 +92,113 @@ void log_network(const net::Status& s) {
     }
 }
 
+// The status LED: blue in setup or without a network, green when ready, purple while the app is on.
+bool g_led_on = true;
+void update_led() {
+    if (!g_led_on) return led::set(led::State::Off);
+    const auto s = net::status();
+    if (dock_server::host_connected()) led::set(led::State::AppConnected);
+    else if (s.link == net::Link::Ethernet || s.link == net::Link::Wifi) led::set(s.ip.empty() ? led::State::Setup : led::State::Ready);
+    else led::set(led::State::Setup);
+}
+
+// ── health: the chip's temperature ──
+temperature_sensor_handle_t g_temp_sensor = nullptr;
+float g_temp = -1000;  // °C, -1000 when not read
+constexpr float kWarmC = 75, kHotC = 90;
+
+void health_task(void*) {
+    // The sensor has fixed ranges: 20-100 °C reaches the alarm; -10-80 °C if a chip hasn't that one.
+    for (const auto& r : {std::pair<int, int>{20, 100}, std::pair<int, int>{-10, 80}}) {
+        temperature_sensor_config_t cfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(r.first, r.second);
+        if (temperature_sensor_install(&cfg, &g_temp_sensor) == ESP_OK) break;
+        g_temp_sensor = nullptr;
+    }
+    if (g_temp_sensor && temperature_sensor_enable(g_temp_sensor) != ESP_OK) g_temp_sensor = nullptr;
+    int level = 0;  // 0 fine, 1 warm, 2 hot
+    for (;;) {
+        float c;
+        if (g_temp_sensor && temperature_sensor_get_celsius(g_temp_sensor, &c) == ESP_OK) {
+            g_temp = c;
+            const int now = c >= kHotC ? 2 : c >= kWarmC ? 1 : 0;
+            if (now > level)
+                eventlog::add(Cat::System, now == 2 ? Level::Error : Level::Warn, "The chip is %s: %.0f °C",
+                              now == 2 ? "too hot" : "warm", static_cast<double>(c));
+            else if (now == 0 && level > 0)
+                eventlog::add(Cat::System, Level::Info, "The chip cooled down: %.0f °C", static_cast<double>(c));
+            level = now;
+        }
+        update_led();
+        vTaskDelay(pdMS_TO_TICKS(10000));
+    }
+}
+
+#if SOC_USB_OTG_SUPPORTED
+constexpr bool kUsbHost = true;
+#else
+constexpr bool kUsbHost = false;
+#endif
+#if CONFIG_ETH_USE_ESP32_EMAC
+constexpr bool kEthernet = true;
+#else
+constexpr bool kEthernet = false;
+#endif
+
+std::string mac_str(esp_mac_type_t type) {
+    uint8_t m[6];
+    if (esp_read_mac(m, type) != ESP_OK) return {};
+    char b[18];
+    std::snprintf(b, sizeof(b), "%02X:%02X:%02X:%02X:%02X:%02X", m[0], m[1], m[2], m[3], m[4], m[5]);
+    return b;
+}
+
+const char* reset_reason();
+
+// GET /api/system: the hardware (the Network Deck panel) and its options (Settings → System).
+std::string system_json() {
+    esp_chip_info_t chip;
+    esp_chip_info(&chip);
+    uint32_t flash = 0;
+    esp_flash_get_size(nullptr, &flash);
+    size_t psram = 0;
+#if CONFIG_SPIRAM
+    psram = esp_psram_get_size();
+#endif
+    const auto sys = settings::system();
+    char b[1024];
+    std::snprintf(
+        b, sizeof(b),
+        "{\"chip\":\"%s\",\"revision\":\"v%d.%d\",\"cores\":%d,\"cpu_mhz\":%d,\"flash_bytes\":%u,\"psram_bytes\":%u,"
+        "\"board\":\"%s\",\"wifi_via\":\"%s\",\"usb_host\":%s,\"ethernet\":%s,\"matter\":%s,"
+        "\"serial\":\"%s\",\"mac_base\":\"%s\",\"mac_ethernet\":\"%s\",\"mac_wifi\":\"%s\","
+        "\"idf\":\"%s\",\"firmware\":\"%s\",\"partition\":\"%s\",\"uptime\":%u,\"reset_reason\":\"%s\","
+        "\"heap_free\":%u,\"heap_min\":%u,\"heap_total\":%u,\"psram_free\":%u,\"temp_c\":%.1f,\"warm_c\":%.0f,\"hot_c\":%.0f,"
+        "\"led\":%s,\"led_gpio\":%d,\"default_led_gpio\":%d,\"usb_power_gpio\":%d}",
+        net::chip_name(), chip.revision / 100, chip.revision % 100, chip.cores, CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+        static_cast<unsigned>(flash), static_cast<unsigned>(psram),
+#if CONFIG_IDF_TARGET_ESP32P4
+        "Waveshare ESP32-P4-NANO", "ESP32-C5 co-processor (esp-hosted)",
+#else
+        "", "",
+#endif
+        kUsbHost ? "true" : "false", kEthernet ? "true" : "false",
+        matter::available() ? "true" : "false", g_serial.c_str(), mac_str(ESP_MAC_BASE).c_str(),
+#if CONFIG_ETH_USE_ESP32_EMAC
+        mac_str(ESP_MAC_ETH).c_str(),
+#else
+        "",
+#endif
+        mac_str(ESP_MAC_WIFI_STA).c_str(), esp_get_idf_version(), esp_app_get_description()->version,
+        esp_ota_get_running_partition()->label, static_cast<unsigned>(esp_timer_get_time() / 1000000), reset_reason(),
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_total_size(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)), static_cast<double>(g_temp),
+        static_cast<double>(kWarmC), static_cast<double>(kHotC), sys.led ? "true" : "false", sys.led_gpio,
+        sys.default_led_gpio, sys.usb_power_gpio);
+    return b;
+}
+
 void publish_net(const net::Status& s) {
     log_network(s);
     // A DHCP address is named in the HTTPS certificate from the next start (static ones always are).
@@ -119,6 +240,12 @@ void apply_network(const settings::Network& n) {
 // A confirmation on the deck. While the Stream Deck app is connected, its traffic to the deck is held
 // back for the prompt, and the deck is virtually replugged afterwards so the app draws again.
 bool ask(const std::string& question) {
+#if !SOC_USB_OTG_SUPPORTED
+    // No USB host on this chip, so never a deck to confirm on: signing in (or the setup hotspot) is the
+    // proof of being allowed.
+    (void)question;
+    return true;
+#endif
     const bool host = dock_server::host_connected();
     if (host) dock_server::set_paused(true);
     const bool yes = deck_ui::confirm(question);
@@ -334,6 +461,17 @@ extern "C" void app_main(void) {
     settings::load();
     eventlog::start();
     log_start();
+    {
+        const auto sys = settings::system();
+        if (sys.usb_power_gpio >= 0) {  // power the USB port before the deck is looked for
+            gpio_reset_pin(static_cast<gpio_num_t>(sys.usb_power_gpio));
+            gpio_set_direction(static_cast<gpio_num_t>(sys.usb_power_gpio), GPIO_MODE_OUTPUT);
+            gpio_set_level(static_cast<gpio_num_t>(sys.usb_power_gpio), 1);
+        }
+        g_led_on = sys.led;
+        if (sys.led) led::start(sys.led_gpio);
+        led::set(led::State::Setup);
+    }
 
     const auto mac = net::mac();
     cora::DockIdentity identity;
@@ -369,6 +507,7 @@ extern "C" void app_main(void) {
     config.on_host_change = [](bool connected) {
         ESP_LOGI(TAG, "host %s", connected ? "connected" : "disconnected");
         deck_ui::set_host(connected);
+        update_led();
         if (connected) {
             xTaskCreatePinnedToCore(describe_host_task, "host_name", 6144, nullptr, 3, nullptr, 0);
         } else {
@@ -415,8 +554,32 @@ extern "C" void app_main(void) {
 
     web::Hooks hooks;
     hooks.status_json = status_json;
+    hooks.system_json = system_json;
+    hooks.set_system = [](const settings::System& sys) {
+        const auto was = settings::system();
+        settings::set_system(sys);
+        g_led_on = sys.led;
+        if (sys.led) led::start(sys.led_gpio);  // a new pin applies at the next start
+        update_led();
+        if (sys.led_gpio != was.led_gpio || sys.usb_power_gpio != was.usb_power_gpio)
+            eventlog::add(Cat::System, Level::Info, "Pins changed (LED %d, USB power %d): applied at the next start",
+                          sys.led_gpio, sys.usb_power_gpio);
+    };
+    hooks.deck_json = [] {
+        // The finish chosen for this deck, by serial (neither USB nor the deck says its colour).
+        std::string j = deck_ui::deck_json();
+        if (usb_bridge::attached() && j.size() > 1 && j.back() == '}') {
+            const std::string f = settings::deck_finish(usb_bridge::info().serial);
+            j.insert(j.size() - 1, ",\"finish\":\"" + f + "\"");
+        }
+        return j;
+    };
+    hooks.set_deck_finish = [](const std::string& f) {
+        if (!usb_bridge::attached()) return false;
+        settings::set_deck_finish(usb_bridge::info().serial, f);
+        return true;
+    };
     hooks.hostname = [] { return net::hostname(); };
-    hooks.deck_json = deck_ui::deck_json;
     hooks.scan = [] {
         std::vector<web::Network> out;
         for (const auto& r : net::scan()) out.push_back({r.ssid, r.rssi, r.secure});
@@ -452,6 +615,7 @@ extern "C" void app_main(void) {
         net::set_hostname(h.empty() ? hostname() : h);
     };
     ESP_ERROR_CHECK(web::start(hooks));
+    xTaskCreatePinnedToCore(health_task, "health", 4096, nullptr, 2, nullptr, 0);
 
     // The new image started its network and services: keep it (otherwise the bootloader rolls back).
     esp_ota_img_states_t state;

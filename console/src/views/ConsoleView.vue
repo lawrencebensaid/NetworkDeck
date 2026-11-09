@@ -13,14 +13,15 @@ import ConnectorsDialog from "../dialogs/ConnectorsDialog.vue"
 import LogsDialog from "../dialogs/LogsDialog.vue"
 import SettingsDialog from "../dialogs/SettingsDialog.vue"
 import MatterPanel from "../panels/MatterPanel.vue"
+import NetworkDeckPanel from "../panels/NetworkDeckPanel.vue"
 import { PANELS, type PanelId } from "../panels/panels.ts"
 import StreamDeckPanel from "../panels/StreamDeckPanel.vue"
 
 const panel = ref<PanelId | null>(null)
-const views = { deck: StreamDeckPanel, matter: MatterPanel }
+const views = { deck: StreamDeckPanel, dock: NetworkDeckPanel, matter: MatterPanel }
 
 const settingsOpen = ref(false)
-const settingsSection = ref("network")
+const settingsSection = ref("system")
 const connectorsOpen = ref(false)
 const logsOpen = ref(false)
 
@@ -40,7 +41,7 @@ function openSettings(section?: string) {
       <SideRail :panel="panel" @panel="toggle" @settings="openSettings" @connectors="connectorsOpen = true" @logs="logsOpen = true" />
       <div class="flex min-h-0 min-w-0 flex-1">
         <SidePanel :open="panel !== null" :title="panel ? PANELS[panel].title : ''" @close="panel = null">
-          <component :is="views[panel]" v-if="panel" />
+          <component :is="views[panel]" v-if="panel" @settings="openSettings" />
         </SidePanel>
         <DeckStage />
       </div>

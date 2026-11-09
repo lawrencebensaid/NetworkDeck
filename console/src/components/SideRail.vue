@@ -1,11 +1,12 @@
 <script setup lang="ts">
 /*
  * The rail: a slim column of icon buttons down the left, from under the top bar to the bottom. At the
- * top the panels beside the deck: the Stream Deck itself and Matter, then the log. At the bottom the
- * dialogs: the settings, the connectors (Matter, the REST API; MCP later) and the account.
+ * top the panels beside the deck: the Stream Deck, the Network Deck (the dock's hardware) and Matter. At
+ * the bottom the dialogs: the log, the settings, the connectors (Matter, the REST API; MCP later) and the
+ * account.
  * On a phone it runs along the bottom.
  */
-import { CircleUser, House, KeyRound, LogOut, Plug, ScrollText, Settings } from "@lucide/vue"
+import { CircleUser, Cpu, KeyRound, LogOut, Plug, ScrollText, Settings } from "@lucide/vue"
 
 import {
   DropdownMenu,
@@ -18,14 +19,15 @@ import {
 import { PANELS, type PanelId } from "../panels/panels.ts"
 import { signOut, store } from "../session/store.ts"
 import DeckIcon from "./DeckIcon.vue"
+import MatterIcon from "./MatterIcon.vue"
 import RailButton from "./RailButton.vue"
 import TipWrap from "./TipWrap.vue"
 
 defineProps<{ panel: PanelId | null }>()
 defineEmits<{ panel: [id: PanelId]; settings: [section?: string]; connectors: []; logs: [] }>()
 
-const icons = { deck: DeckIcon, matter: House }
-const order: PanelId[] = ["deck", "matter"]
+const icons = { deck: DeckIcon, dock: Cpu, matter: MatterIcon }
+const order: PanelId[] = ["deck", "dock", "matter"]
 </script>
 
 <template>
@@ -46,15 +48,14 @@ const order: PanelId[] = ["deck", "matter"]
       </RailButton>
     </TipWrap>
 
+    <div class="min-h-0 flex-1" />
+    <div class="mx-1 h-6 w-px bg-border md:mx-auto md:my-1 md:h-px md:w-6" aria-hidden="true" />
+
     <TipWrap tip="Logs" side="right">
       <RailButton aria-label="Logs" data-testid="logs-button" @mousedown.prevent @click="$emit('logs')">
         <ScrollText />
       </RailButton>
     </TipWrap>
-
-    <div class="min-h-0 flex-1" />
-    <div class="mx-1 h-6 w-px bg-border md:mx-auto md:my-1 md:h-px md:w-6" aria-hidden="true" />
-
     <TipWrap tip="Settings" side="right">
       <RailButton aria-label="Settings" data-testid="settings-button" @click="$emit('settings')">
         <Settings />

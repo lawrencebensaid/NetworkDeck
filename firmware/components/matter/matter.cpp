@@ -315,6 +315,8 @@ esp_err_t open_window() {
     return ok ? ESP_OK : ESP_FAIL;
 }
 
+bool available() { return true; }
+
 bool has_setup_code() {
     nvs_handle_t h;
     if (nvs_open(kNvsNamespace, NVS_READONLY, &h) != ESP_OK) return false;

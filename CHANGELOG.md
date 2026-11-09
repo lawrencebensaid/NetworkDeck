@@ -15,9 +15,17 @@ adds a line under "Unreleased"; the release that raises `VERSION` renames that s
 - Connectors (was Integrations): each service is switched on there. The REST API is new: on or off,
   with its API keys (sent as `Authorization: Bearer`), documented in `docs/api.md`. A key can also be
   made by confirming on the deck, without signing in.
-- The web interface names the computer the Stream Deck app connected from: the name your router has
-  for it (reverse DNS), or the computer's own network name (NetBIOS).
-- A white Stream Deck MK.2 is drawn white, recognised by its serial number.
+- The web interface names that computer: the name your router has for it (reverse DNS), or the
+  computer's own network name (NetBIOS).
+- Each Stream Deck's finish (black or a slightly cream white) is remembered by the dock, chosen once in
+  the Stream Deck panel; until then a white MK.2 is guessed from its serial number.
+- A Network Deck panel: the board, chip, memory, MAC addresses and temperature, and a light in the top bar
+  that turns amber when the chip runs warm or low on memory and red when it is too hot.
+- Settings → System: the status LED (blue in setup, green when ready, purple while the Stream Deck app is
+  connected) and its pin, a pin for a switched USB port, and restarting the dock.
+- Firmware for the ESP32-C6, for the web interface without a P4: Wi-Fi only, no Stream Deck (the C6 has no
+  USB host) and no Matter yet. The setup network is called "NetworkDeck ESP32-P4" or "NetworkDeck ESP32-C6".
+- The computer the Stream Deck app connected from is shown above the deck.
 - Versions say what a build is: `0.2.0` a release, `0.2.0-beta.N` a build of develop, `0.2.0-pr.4.N`
   a test build of a pull request, `0.2.0-dev+<commit>` a local build.
 - The dock keeps its clock from the network (log times).

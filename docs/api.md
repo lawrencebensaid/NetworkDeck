@@ -32,7 +32,8 @@ header is not needed.
 - `401` without a valid key or session, `403` without the header a cookie request needs, `409` when
   the dock refuses (the message says why), `429` while sign-in is locked after wrong passwords.
 - Every change to the dock's settings is confirmed on the deck (✓ or ✕, 30 seconds), so those requests
-  can take that long to answer. Requests from the dock's setup network need no confirmation.
+  can take that long to answer. Requests from the dock's setup network need no confirmation, and
+  neither do changes on chips without a USB host (the ESP32-C6), where there is never a deck to ask.
 
 ## Endpoints
 
@@ -41,9 +42,10 @@ header is not needed.
 | Method | Path | What |
 |---|---|---|
 | GET | `/api/status` | The dock: name, serial, firmware, link, IP, Wi-Fi, hostname, addressing, and the Stream Deck app's computer (`host`, `host_ip`, `host_name`, `host_seconds`; the name from the router's reverse DNS or the computer's NetBIOS name). |
-| GET | `/api/deck` | The deck on the USB port: `attached`, `pid`, `model`, `serial`, `cols`, `rows`, `key_px`, who draws (`source`: `app` or `dock`), each key's version or colour (`keys`), which keys are pressed (`pressed`), and `quiet_ms` since the app last changed a key. |
+| GET | `/api/deck` | The deck on the USB port: `attached`, `pid`, `model`, `serial`, `cols`, `rows`, `key_px`, `finish`, who draws (`source`: `app` or `dock`), each key's version or colour (`keys`), which keys are pressed (`pressed`), and `quiet_ms` since the app last changed a key. |
 | GET | `/api/key?n=<key>&v=<version>` | The image on a key (JPEG or BMP, in the deck's orientation; `transform` in `/api/deck` turns it upright). `204` for a key with no image. |
 | POST | `/api/deck/brightness` | `value` 0–100: the brightness of the dock's own screens. |
+| POST | `/api/deck/finish` | `value` `black` or `white`: how the web interface draws this deck (remembered by serial). |
 
 ### Log
 
@@ -62,6 +64,15 @@ header is not needed.
 | POST | `/api/wifi` | `ssid`, `password`: join this network. Confirmed on the deck. |
 | POST | `/api/wifi/enabled` | `value` `1` or `0`. Turning Wi-Fi off is confirmed on the deck. |
 | POST | `/api/wifi/forget` | Forget the saved network. Confirmed on the deck. |
+
+### System
+
+| Method | Path | What |
+|---|---|---|
+| GET | `/api/system` | The hardware: `chip`, `revision`, `cores`, `cpu_mhz`, `flash_bytes`, `psram_bytes`, `board`, what it can do (`usb_host`, `ethernet`, `matter`), `serial`, MAC addresses, `firmware`, `uptime`, `reset_reason`, memory (`heap_free`, `heap_min`, `heap_total`, `psram_free`), `temp_c` (and the `warm_c` / `hot_c` thresholds), and the options: `led`, `led_gpio`, `usb_power_gpio`. |
+| POST | `/api/system` | Any of `led` (`1`/`0`, at once), `led_gpio`, `usb_power_gpio` (a GPIO number or `none`; at the next start). |
+| POST | `/api/restart` | Restart the dock. Confirmed on the deck. |
+| GET / POST | `/api/rest` | The REST API connector: `{"enabled"}`; `value` `1`/`0` turns it on or off (while off, API keys are refused). |
 
 ### Matter
 

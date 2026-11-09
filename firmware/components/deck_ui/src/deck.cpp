@@ -6,7 +6,10 @@
 #include <utility>
 #include <vector>
 
+#include "soc/soc_caps.h"
+#if SOC_JPEG_CODEC_SUPPORTED
 #include "driver/jpeg_encode.h"
+#endif
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -62,10 +65,12 @@ SemaphoreHandle_t g_answer = nullptr;
 SemaphoreHandle_t g_confirm_lock = nullptr;
 TaskHandle_t g_task = nullptr;
 
+#if SOC_JPEG_CODEC_SUPPORTED
 jpeg_encoder_handle_t g_jpeg = nullptr;
 uint8_t* g_jpeg_in = nullptr;
 uint8_t* g_jpeg_out = nullptr;
 size_t g_jpeg_in_cap = 0, g_jpeg_out_cap = 0;
+#endif
 
 bool owns_locked() { return g_model && (!g_host || g_prompt.active); }
 
@@ -85,6 +90,9 @@ bool encode(const Model& m, const Canvas& key, std::vector<uint8_t>& out) {
         out = bmp(m, px);
         return true;
     }
+#if !SOC_JPEG_CODEC_SUPPORTED
+    return false;  // gen2 decks need JPEG: only with the hardware encoder (the P4) so far
+#else
     if (!g_jpeg) {
         jpeg_encode_engine_cfg_t ecfg{};
         ecfg.timeout_ms = 100;
@@ -114,6 +122,7 @@ bool encode(const Model& m, const Canvas& key, std::vector<uint8_t>& out) {
         return false;
     out.assign(g_jpeg_out, g_jpeg_out + size);
     return true;
+#endif
 }
 
 // Draws every key whose image changed. Rendering happens under the lock; USB writes outside it.

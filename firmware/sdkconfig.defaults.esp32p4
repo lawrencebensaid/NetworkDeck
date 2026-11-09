@@ -1,0 +1,54 @@
+# ESP32-P4 (Waveshare ESP32-P4-NANO): 16 MB flash, PSRAM, Ethernet, USB host, Wi-Fi through the
+# board's ESP32-C5, Matter.
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+CONFIG_SPIRAM=y
+# Stream Deck gen2 decks use 1024-byte interrupt OUT reports
+CONFIG_USB_HOST_HW_BUFFER_BIAS_PERIODIC_OUT=y
+CONFIG_ETH_ENABLED=y
+CONFIG_ETH_USE_ESP32_EMAC=y
+
+# Wi-Fi co-processor: the P4-NANO used here carries an ESP32-C5 (esp-hosted 2.12.9), not a C6.
+CONFIG_SLAVE_IDF_TARGET_ESP32C5=y
+
+# Image streaming: the socket receive mailbox was 6 packets, which capped TCP at ~500 KB/s whatever the
+# window. Room for a full 64 KB window of 1440-byte segments, and Ethernet DMA buffers of one frame each.
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=64
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
+CONFIG_LWIP_TCP_WND_DEFAULT=65534
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=32768
+CONFIG_ETH_DMA_RX_BUFFER_NUM=40
+CONFIG_ETH_DMA_TX_BUFFER_NUM=20
+CONFIG_ETH_DMA_BUFFER_SIZE=1536
+
+# ── Matter (components/matter) ──
+# On-network commissioning over the network components/net runs: Matter neither drives Wi-Fi nor
+# Bluetooth, and shares the IDF mDNS responder with the dock's _elg service.
+CONFIG_ENABLE_WIFI_STATION=n
+CONFIG_ENABLE_WIFI_AP=n
+CONFIG_ENABLE_CHIPOBLE=n
+CONFIG_BT_ENABLED=n
+CONFIG_ENABLE_ETHERNET_TELEMETRY=y
+CONFIG_ENABLE_MATTER_OVER_THREAD=n
+CONFIG_OPENTHREAD_ENABLED=n
+CONFIG_USE_MINIMAL_MDNS=n
+CONFIG_ENABLE_CHIP_SHELL=n
+CONFIG_ENABLE_OTA_REQUESTOR=n
+CONFIG_CUSTOM_COMMISSIONABLE_DATA_PROVIDER=y
+CONFIG_ESP_MATTER_MAX_DYNAMIC_ENDPOINT_COUNT=34
+CONFIG_MBEDTLS_HKDF_C=y
+# Matter posts its lwIP calls to the TCP/IP task. Its default, lwIP core locking, takes the stream to
+# the deck from 21-28 full redraws a second down to 13-15.
+CONFIG_USE_TCPIP_CORE_LOCK_FOR_THREAD_SAFETY=n
+# Matter needs IPv6: a link-local address (components/net adds it), SLAAC, and an address per fabric.
+CONFIG_LWIP_IPV6_AUTOCONFIG=y
+CONFIG_LWIP_IPV6_NUM_ADDRESSES=6
+CONFIG_LWIP_HOOK_IP6_ROUTE_DEFAULT=y
+CONFIG_LWIP_HOOK_ND6_GET_GW_DEFAULT=y
+
+# TLS buffers and contexts in PSRAM.
+CONFIG_MBEDTLS_EXTERNAL_MEM_ALLOC=y
+
+# The Wi-Fi link's receive buffers grow with the traffic; in internal RAM (shared with Matter, TLS
+# and the web server) the allocation failed under load and the driver asserted. The P4's DMA reaches PSRAM.
+CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y

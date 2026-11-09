@@ -5,7 +5,8 @@
  * and listed as such. The list is at the left with each one's state, the chosen one at the right.
  */
 import { computed, onBeforeUnmount, ref, watch, type Component } from "vue"
-import { Cable, House, Webhook, X } from "@lucide/vue"
+import { Cable, Webhook, X } from "@lucide/vue"
+import MatterIcon from "../components/MatterIcon.vue"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -17,6 +18,7 @@ import { toast } from "vue-sonner"
 import ApiKeysPanel from "../panels/ApiKeysPanel.vue"
 import MatterPanel from "../panels/MatterPanel.vue"
 import { api, type Matter } from "../session/api.ts"
+import { store } from "../session/store.ts"
 
 const open = defineModel<boolean>("open", { required: true })
 const chosen = ref<"matter" | "rest" | "mcp">("matter")
@@ -66,9 +68,9 @@ interface Integration {
 const integrations = computed<Integration[]>(() => {
   const m = matter.value
   const n = m?.fabrics ?? 0
-  const matterState = !m ? "…" : !m.running ? (m.enabled ? "Did not start" : "Off") : n > 0 ? (n === 1 ? "1 controller" : `${n} controllers`) : m.window_open ? "Ready to pair" : "Not paired"
+  const matterState = store.system && !store.system.matter ? "Not on this chip" : !m ? "…" : !m.running ? (m.enabled ? "Did not start" : "Off") : n > 0 ? (n === 1 ? "1 controller" : `${n} controllers`) : m.window_open ? "Ready to pair" : "Not paired"
   return [
-    { id: "matter", name: "Matter", icon: House, state: matterState },
+    { id: "matter", name: "Matter", icon: MatterIcon, state: matterState },
     {
       id: "rest",
       name: "REST API",
@@ -133,7 +135,8 @@ const LATER = {
             <template v-if="chosen === 'matter'">
               <h2 class="text-base font-semibold tracking-tight">Matter</h2>
               <p class="mt-0.5 mb-5 text-sm text-muted-foreground">Home Assistant, Apple Home and Google Home: every key is a button there, for automations.</p>
-              <MatterPanel />
+              <p v-if="store.system && !store.system.matter" class="text-sm text-muted-foreground">Matter isn't in the firmware for the {{ store.system.chip }} yet: it needs more memory than this chip has next to the web interface.</p>
+              <MatterPanel v-else />
             </template>
             <template v-else-if="chosen === 'rest'">
               <h2 class="text-base font-semibold tracking-tight">REST API</h2>

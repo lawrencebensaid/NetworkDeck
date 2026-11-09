@@ -69,11 +69,20 @@ cmake -S firmware/test/host -B build/host -G Ninja && cmake --build build/host &
 `tools/dock-client` is a test host built on `@elgato-stream-deck/tcp` (discover, read the dock,
 draw, read keys, benchmark).
 
+Other chips: the ESP32-C6 builds with its own configuration and build folder (Wi-Fi and the web
+interface; no Stream Deck, the C6 has no USB host):
+
+```sh
+idf.py -B build-c6 -DIDF_TARGET=esp32c6 -DSDKCONFIG=sdkconfig.c6 build flash monitor
+```
+
+Chip-specific settings are in `firmware/sdkconfig.defaults.<chip>`.
+
 ## Development
 
 Pull requests go into `develop`; merging `develop` into `main` releases when `VERSION` was raised
 (see `.github/workflows/firmware.yml` and `CHANGELOG.md`). CI runs on the self-hosted runner in the k3s
-cluster (`deploy/ci-runner/`).
+cluster (`deploy/ci-runner/`: `sh deploy/ci-runner/setup.sh` creates or updates it).
 
 The web interface lives in `console/` (Vue): `npm run build:firmware` writes the gzipped page the
 firmware embeds; `ND_DEVICE=http://<ip> npm run dev` serves it with the API proxied to a dock.

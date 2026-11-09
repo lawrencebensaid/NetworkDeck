@@ -17,6 +17,7 @@ import { computed, ref, watch } from "vue"
 
 import logo from "../assets/stream-deck-logo.png"
 import { finishOf, hardware } from "../session/models.ts"
+import AppPill from "./AppPill.vue"
 import { refreshDeck, store } from "../session/store.ts"
 
 const LOGO_RATIO = 560 / 110 /* the logo image, width over height */
@@ -26,7 +27,7 @@ const { width, height } = useElementSize(stage)
 
 const deck = computed(() => store.deck)
 const hw = computed(() => hardware(deck.value?.pid, deck.value?.cols, deck.value?.rows, deck.value?.model))
-const finish = computed(() => finishOf(hw.value, deck.value?.serial))
+const finish = computed(() => finishOf(hw.value, deck.value?.finish, deck.value?.serial))
 
 /* What the keys show now: committed a page at a time. */
 interface Face {
@@ -135,6 +136,7 @@ const caption = computed(() => {
     aria-label="Stream Deck"
     data-testid="stage"
   >
+    <div class="absolute top-4 left-1/2 z-10 -translate-x-1/2"><AppPill /></div>
     <template v-if="deck?.attached">
       <div
         class="body"
@@ -189,8 +191,9 @@ const caption = computed(() => {
     0 calc(var(--mm) * 4) calc(var(--mm) * 10) calc(var(--mm) * -3) rgba(0, 0, 0, 0.45);
   --logo: #f2f2f2;
 }
+/* Elgato's white is not paper white: a faint cream. */
 .body[data-finish="white"] {
-  background: linear-gradient(180deg, #fbfbfb 0%, #f1f1f2 60%, #e9e9eb 100%);
+  background: linear-gradient(180deg, #fbf9f4 0%, #f3f0e8 60%, #ebe7dd 100%);
   box-shadow:
     0 0 0 1px rgba(0, 0, 0, 0.08),
     inset 0 1px 0 #fff,

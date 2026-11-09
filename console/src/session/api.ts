@@ -56,6 +56,7 @@ export interface Deck {
   attached: boolean;
   pid?: number; /* USB product id */
   live?: boolean; /* false: a deck the dock bridges but can't show the keys of */
+  finish?: "black" | "white" | ""; /* as chosen for this deck (by serial); empty: not chosen */
   quiet_ms?: number; /* since the Stream Deck app last changed a key */
   model?: string;
   cols?: number;
@@ -69,6 +70,40 @@ export interface Deck {
   usb_rev?: string; /* bcdDevice, as 1.00 */
   keys?: DeckKey[];
   pressed?: number[];
+}
+
+export interface SystemInfo {
+  chip: string; /* "ESP32-P4" */
+  revision: string;
+  cores: number;
+  cpu_mhz: number;
+  flash_bytes: number;
+  psram_bytes: number;
+  board: string;
+  wifi_via: string; /* the P4's Wi-Fi co-processor, empty on chips with their own Wi-Fi */
+  usb_host: boolean;
+  ethernet: boolean;
+  matter: boolean;
+  serial: string;
+  mac_base: string;
+  mac_ethernet: string;
+  mac_wifi: string;
+  idf: string;
+  firmware: string;
+  partition: string;
+  uptime: number;
+  reset_reason: string;
+  heap_free: number;
+  heap_min: number;
+  heap_total: number;
+  psram_free: number;
+  temp_c: number; /* -1000 when not read */
+  warm_c: number;
+  hot_c: number;
+  led: boolean;
+  led_gpio: number;
+  default_led_gpio: number;
+  usb_power_gpio: number;
 }
 
 export interface ApiKeyInfo {
@@ -170,6 +205,10 @@ export const api = {
   wifiEnabled: (on: boolean) => post("/api/wifi/enabled", { value: on ? "1" : "0" }),
   wifiForget: () => post("/api/wifi/forget"),
   hostname: (value: string) => post("/api/hostname", { value }),
+  finish: (value: "black" | "white") => post("/api/deck/finish", { value }),
+  system: () => get<SystemInfo>("/api/system"),
+  setSystem: (data: Record<string, string>) => post("/api/system", data),
+  restart: () => post("/api/restart"),
   rest: () => get<{ enabled: boolean }>("/api/rest"),
   setRest: (on: boolean) => post("/api/rest", { value: on ? "1" : "0" }),
   keys: () => get<ApiKeyInfo[]>("/api/keys"),

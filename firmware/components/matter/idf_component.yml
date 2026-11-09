@@ -3,3 +3,5 @@ dependencies:
   espressif/esp_matter:
     version: "1.6.1"
     override_path: "../../third_party/esp_matter"
+    rules:
+      - if: "target == esp32p4"

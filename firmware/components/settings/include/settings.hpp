@@ -32,6 +32,21 @@ Wifi wifi();
 void set_wifi(const Wifi& w);
 
 // Brightness of the dock's own screens on the deck, 0..100 (the Stream Deck app sets its own).
+// How the web interface draws a deck: "black", "white", or empty when not chosen. Per deck serial
+// (neither USB nor the deck says its colour), at most 8 decks remembered.
+std::string deck_finish(const std::string& serial);
+void set_deck_finish(const std::string& serial, const std::string& finish);
+
+// The dock's hardware options (Settings → System). Pins take effect at the next start; -1: none.
+struct System {
+    bool led = true;          // the status LED (blue: setup, green: ready, purple: the app connected)
+    int led_gpio = -1;        // its WS2812 data pin
+    int usb_power_gpio = -1;  // driven high to power the USB port (boards with a switched 5 V)
+    int default_led_gpio = -1;
+};
+System system();
+void set_system(const System& sys);
+
 int deck_brightness();
 void set_deck_brightness(int percent);
 

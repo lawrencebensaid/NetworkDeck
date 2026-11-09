@@ -1,7 +1,8 @@
 <script setup lang="ts">
 /*
  * The top bar: the dock (mark, name, and whether the page hears from it) at the left, in a cell as wide
- * as the rail under it; in the middle its lights: the Stream Deck on its USB port and its network. Each
+ * as the rail under it; in the middle its lights: the Stream Deck on its USB port, its network and the
+ * dock's own hardware (temperature, memory). Each
  * light opens what it knows and where to change it. Translucent, so the stage reads as running under it.
  */
 import { computed, ref } from "vue"
@@ -12,9 +13,15 @@ import { store } from "../session/store.ts"
 import BarLight from "./BarLight.vue"
 import BrandMark from "./BrandMark.vue"
 
-const emit = defineEmits<{ settings: [section?: string]; panel: [id: "deck"] }>()
+const emit = defineEmits<{ settings: [section?: string]; panel: [id: "deck" | "dock"] }>()
 
-const { deck, network, stale } = useLights()
+const { deck, network, dock, stale } = useLights()
+const y = computed(() => store.system)
+const dockOpen = ref(false)
+function toDock() {
+  dockOpen.value = false
+  emit("panel", "dock")
+}
 const s = computed(() => store.status)
 const d = computed(() => store.deck)
 const deckOpen = ref(false)
@@ -91,6 +98,20 @@ function toSettings(section: string) {
           <Button variant="outline" size="sm" @click="toSettings('network')">Network settings</Button>
           <Button v-if="s?.wifi_available" variant="ghost" size="sm" @click="toSettings('wifi')">Wi-Fi</Button>
         </div>
+      </BarLight>
+      <BarLight v-model:open="dockOpen" :light="dock">
+        <p class="text-muted-foreground">{{ dock.tip }}</p>
+        <dl v-if="y" class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1">
+          <dt class="text-muted-foreground">Chip</dt>
+          <dd>{{ y.chip }} {{ y.revision }}</dd>
+          <template v-if="y.temp_c > -100">
+            <dt class="text-muted-foreground">Temperature</dt>
+            <dd>{{ Math.round(y.temp_c) }} °C</dd>
+          </template>
+          <dt class="text-muted-foreground">Free RAM</dt>
+          <dd>{{ Math.round(y.heap_free / 1024) }} KB</dd>
+        </dl>
+        <Button variant="outline" size="sm" @click="toDock">Network Deck details</Button>
       </BarLight>
     </div>
   </header>

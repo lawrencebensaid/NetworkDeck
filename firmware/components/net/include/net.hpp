@@ -15,6 +15,8 @@ namespace net {
 
 enum class Link { None, Ethernet, Wifi, Hotspot };
 const char* link_name(Link l);
+// The chip the firmware runs on: "ESP32-P4", "ESP32-C6".
+const char* chip_name();
 
 struct Status {
     Link link = Link::None;

@@ -4,7 +4,7 @@
  * light also says when the page stops hearing from the dock.
  */
 import { useIntervalFn } from "@vueuse/core"
-import { EthernetPort, RadioTower, Unplug, Wifi, WifiOff } from "@lucide/vue"
+import { Cpu, EthernetPort, RadioTower, Thermometer, Unplug, Wifi, WifiOff } from "@lucide/vue"
 import { computed, ref, type Component } from "vue"
 
 import DeckIcon from "../components/DeckIcon.vue"
@@ -14,7 +14,7 @@ import { store } from "./store.ts"
 export type Tone = "on" | "attention" | "error" | "busy" | "off"
 
 export interface Light {
-  id: "deck" | "network"
+  id: "deck" | "network" | "dock"
   name: string
   tone: Tone
   state: string
@@ -94,5 +94,19 @@ export function useLights() {
     }
   })
 
-  return { deck, network, stale }
+  /* The dock's own hardware: its temperature and memory. */
+  const dock = computed<Light>(() => {
+    const y = store.system
+    const base = { id: "dock" as const, name: "Network Deck", icon: Cpu }
+    if (!y) return { ...base, tone: "off", state: "Checking", tip: "Asking the dock about itself." }
+    const t = y.temp_c > -100 ? `${Math.round(y.temp_c)} °C` : ""
+    if (y.temp_c >= y.hot_c)
+      return { ...base, icon: Thermometer, tone: "error", state: "Too hot", tip: `The ${y.chip} is at ${t}: give it air, or it may stop.` }
+    if (y.temp_c >= y.warm_c) return { ...base, icon: Thermometer, tone: "attention", state: "Warm", tip: `The ${y.chip} is at ${t}.` }
+    if (y.heap_free < 24 * 1024)
+      return { ...base, tone: "attention", state: "Low on memory", tip: `${Math.round(y.heap_free / 1024)} KB of RAM left.` }
+    return { ...base, tone: "on", state: "Healthy", tip: `${y.chip}${t ? `, ${t}` : ""}, ${Math.round(y.heap_free / 1024)} KB of RAM free.` }
+  })
+
+  return { deck, network, dock, stale }
 }

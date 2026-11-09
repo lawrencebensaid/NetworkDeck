@@ -674,6 +674,58 @@ esp_err_t log_get(httpd_req_t* req) {
     return send_json(req, eventlog::json(before, limit));
 }
 
+esp_err_t finish_post(httpd_req_t* req) {
+    if (!allowed(req, true)) return ESP_OK;
+    std::string body;
+    if (!read_form(req, body)) return result(req, false, "Bad request", "400 Bad Request");
+    const std::string f = field(body, "value");
+    if (f != "black" && f != "white") return result(req, false, "The finish is black or white");
+    if (!g_hooks.set_deck_finish || !g_hooks.set_deck_finish(f)) return result(req, false, "No Stream Deck plugged in");
+    return result(req, true, "Shown in " + f);
+}
+
+// ── system ──────────────────────────────────────────────────────────────────
+
+esp_err_t system_get(httpd_req_t* req) {
+    if (!allowed(req, false)) return ESP_OK;
+    return send_json(req, g_hooks.system_json ? g_hooks.system_json() : "{}");
+}
+
+bool parse_pin(const std::string& v, int& out) {
+    if (v.empty() || v == "none") {
+        out = -1;
+        return true;
+    }
+    char* end = nullptr;
+    const long n = std::strtol(v.c_str(), &end, 10);
+    if (*end || n < -1 || n > 63) return false;
+    out = static_cast<int>(n);
+    return true;
+}
+
+// LED on/off right away; pins at the next start. Not confirmed on the deck: nothing here locks anyone
+// out or changes the network.
+esp_err_t system_post(httpd_req_t* req) {
+    if (!allowed(req, true)) return ESP_OK;
+    std::string body;
+    if (!read_form(req, body)) return result(req, false, "Bad request", "400 Bad Request");
+    auto sys = settings::system();
+    if (!field(body, "led").empty()) sys.led = field(body, "led") == "1";
+    if (!field(body, "led_gpio").empty() && !parse_pin(field(body, "led_gpio"), sys.led_gpio))
+        return result(req, false, "A pin is a GPIO number (0-63), or empty for none");
+    if (!field(body, "usb_power_gpio").empty() && !parse_pin(field(body, "usb_power_gpio"), sys.usb_power_gpio))
+        return result(req, false, "A pin is a GPIO number (0-63), or empty for none");
+    if (g_hooks.set_system) g_hooks.set_system(sys);
+    return result(req, true, "Saved");
+}
+
+esp_err_t restart_work(httpd_req_t* req) {
+    if (!confirmed(req, "Restart the dock?")) return result(req, false, "Not confirmed on the deck");
+    eventlog::add(Cat::System, Level::Info, "Restart asked for from %s", peer_ip(req).c_str());
+    xTaskCreate(restart_soon, "restart", 2048, nullptr, 5, nullptr);
+    return result(req, true, "Restarting");
+}
+
 // Changes can wait up to 30 s for an answer on the deck. The server has a single task, so those
 // requests are finished on a worker task and the rest of the interface keeps answering meanwhile.
 struct Job {
@@ -716,6 +768,7 @@ esp_err_t wifi_forget_post(httpd_req_t* req) { return allowed(req, true) ? run_a
 esp_err_t wifi_post(httpd_req_t* req) { return allowed(req, true) ? run_async(req, wifi_work) : ESP_OK; }
 esp_err_t network_post(httpd_req_t* req) { return allowed(req, true) ? run_async(req, network_work) : ESP_OK; }
 esp_err_t update_post(httpd_req_t* req) { return allowed(req, true) ? run_async(req, update_work) : ESP_OK; }
+esp_err_t restart_post(httpd_req_t* req) { return allowed(req, true) ? run_async(req, restart_work) : ESP_OK; }
 esp_err_t key_create_post(httpd_req_t* req) {
     char v[8];
     if (!api_key_ok(req) && httpd_req_get_hdr_value_str(req, "X-NetworkDeck", v, sizeof(v)) != ESP_OK)
@@ -802,6 +855,10 @@ esp_err_t start(const Hooks& hooks) {
         {"/api/keys", HTTP_POST, key_create_post, nullptr},
         {"/api/keys/delete", HTTP_POST, key_delete_post, nullptr},
         {"/api/log", HTTP_GET, log_get, nullptr},
+        {"/api/deck/finish", HTTP_POST, finish_post, nullptr},
+        {"/api/system", HTTP_GET, system_get, nullptr},
+        {"/api/system", HTTP_POST, system_post, nullptr},
+        {"/api/restart", HTTP_POST, restart_post, nullptr},
     };
     for (const auto& u : uris) {
         httpd_register_uri_handler(server, &u);
