@@ -243,3 +243,29 @@ TEST_CASE("holding both top corner keys for 10 s asks for a factory reset, once"
     ui.on_key(4, false, 20000);
     CHECK(ui.on_tick(30000).kind == UiEvent::Kind::None);
 }
+
+TEST_CASE("image reports split back into key, part, last and payload") {
+    std::vector<uint8_t> img(2100, 7);
+    auto reports = image_reports(mk2(), 9, img);
+    size_t total = 0;
+    for (size_t i = 0; i < reports.size(); ++i) {
+        ImagePart p;
+        REQUIRE(parse_image_report(mk2(), reports[i].data(), reports[i].size(), p));
+        CHECK(p.key == 9);
+        CHECK(p.part == static_cast<int>(i));
+        CHECK(p.last == (i + 1 == reports.size()));
+        total += p.len;
+    }
+    CHECK(total == img.size());
+    auto mini_reports = image_reports(mini(), 4, img);
+    ImagePart q;
+    REQUIRE(parse_image_report(mini(), mini_reports[0].data(), mini_reports[0].size(), q));
+    CHECK(q.key == 4);
+    uint8_t fill[] = {0x03, 0x06, 2, 10, 20, 30};
+    int key = -1;
+    Rgb c;
+    REQUIRE(parse_fill_report(mk2(), fill, sizeof(fill), key, c));
+    CHECK(key == 2);
+    CHECK(c.g == 20);
+    CHECK(std::string(css_transform(mk2())) == "rotate(180deg)");
+}

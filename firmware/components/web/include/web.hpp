@@ -1,5 +1,5 @@
-// The dock's web interface: status, Wi-Fi setup, network settings, firmware upload and the protocol
-// trace. Viewing is open; every change is confirmed on the deck, except from the setup hotspot.
+// The dock's web interface (the console in console/, served gzipped) and its API. Everything but the
+// page and sign-in needs a session; changes are also confirmed on the deck, except from the setup hotspot.
 #pragma once
 
 #include <functional>
@@ -19,6 +19,7 @@ struct Network {
 
 struct Hooks {
     std::function<std::string()> status_json;               // GET /api/status
+    std::function<std::string()> deck_json;                 // GET /api/deck: model, keys, who draws
     std::function<std::vector<Network>()> scan;              // GET /api/scan
     std::function<std::string()> trace;                      // GET /trace
     // GET /api/key?n=<key>: the image on that key, and its content type

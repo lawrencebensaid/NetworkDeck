@@ -6,8 +6,17 @@ adds a line under "Unreleased"; the release that raises `VERSION` renames that s
 
 ## Unreleased
 
+### Added
+- A new web interface: the Stream Deck on the dock is shown live in the middle, with what the
+  Stream Deck app (or the dock) has on its keys and which key is pressed. Network, Wi-Fi, firmware,
+  security and diagnostics open as side panels.
+
 ### Changed
 - Key images reach the deck about six times faster: full-deck redraws went from 3–4 to over 20 a second.
+
+### Security
+- The web interface and firmware upload need a password. You choose it the first time you open the
+  interface and confirm it on the deck; five wrong tries lock sign-in for 30 seconds.
 
 ## [0.1.0] - 2026-11-08
 

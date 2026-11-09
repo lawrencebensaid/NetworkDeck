@@ -120,6 +120,7 @@ bool execute(Conn* c, const cora::Action& a) {
             // Blocking here stops us reading the socket: TCP then slows the host down.
             const int64_t t0 = esp_timer_get_time();
             ++g_usb_reports;
+            if (g_config.on_host_output) g_config.on_host_output(a.frame.payload.data(), a.frame.payload.size());
             while (!usb_bridge::write(a.frame.payload.data(), a.frame.payload.size(), pdMS_TO_TICKS(200))) {
                 if (!usb_bridge::attached()) return true;  // deck gone: drop, the plug event tells the host
                 for (const auto& t : c->session.on_tick(Conn::now_ms()))
@@ -131,6 +132,7 @@ bool execute(Conn* c, const cora::Action& a) {
         case K::UsbSetFeature:
             if (g_paused) return true;
             ESP_LOGI(TAG, "deck ← set %s", cora::describe(a.frame).c_str());
+            if (g_config.on_host_feature) g_config.on_host_feature(a.frame.payload.data(), a.frame.payload.size());
             usb_bridge::set_feature(a.frame.payload.data(), a.frame.payload.size());
             return true;
         case K::UsbGetFeature: {
