@@ -18,6 +18,8 @@ struct Callbacks {
     // After a prompt shown while a host was connected: unplug and replug the deck virtually,
     // so the host redraws its profile.
     std::function<void()> on_replug;
+    // A key went down or up (0 = top-left), whoever owns the deck. Runs on the USB task.
+    std::function<void(int key, bool down)> on_key;
 };
 
 void start(const Callbacks& cb);
@@ -30,6 +32,8 @@ bool owns_deck();
 void input(const uint8_t* report, size_t len);
 
 void set_net(const NetInfo& n);
+// Brightness of the dock's own screens, 0..100. Applied at once while they are on the deck.
+void set_brightness(int percent);
 void set_hotspot(const Hotspot& h);
 
 // Asks on the deck and waits (up to 30 s) for ✓ or ✕. False if no deck we can draw on is attached.
@@ -43,7 +47,8 @@ void observe_input(const uint8_t* report, size_t len);
 // The image on `key` now (JPEG or BMP, in the deck's orientation), and its content type. Empty if the
 // key shows nothing or a plain colour (see deck_json()).
 std::vector<uint8_t> key_image(int key, std::string& content_type);
-// {"attached","model","cols","rows","key_px","transform","source":"app"|"dock","keys":[{"v","color"}],"pressed":[..]}
+// {"attached","model","product","serial","usb_rev","cols","rows","key_px","transform","source":"app"|"dock",
+//  "brightness","keys":[{"v","color"}],"pressed":[..]}
 std::string deck_json();
 
 }  // namespace deck_ui

@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <memory>
 #include <mutex>
+#include <utility>
 #include <vector>
 
 #include "driver/jpeg_encode.h"
@@ -18,7 +19,6 @@ namespace deck_ui {
 namespace {
 
 constexpr char TAG[] = "deck_ui";
-constexpr int kBrightness = 70;
 
 uint32_t now_ms() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
 
@@ -52,6 +52,7 @@ std::vector<uint32_t> g_dock_version;
 std::vector<bool> g_pressed;
 uint32_t g_version_seq = 1;
 bool g_brightness_set = false;
+int g_brightness = 70;
 Pending g_prompt;
 uint32_t g_next_prompt = 1;
 QueueHandle_t g_events = nullptr;
@@ -118,11 +119,13 @@ void draw() {
     const Model* m;
     std::vector<std::pair<int, Canvas>> todo;
     bool set_brightness = false;
+    int brightness = 0;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (!owns_locked() || !g_ui) return;
         m = g_model;
         set_brightness = !g_brightness_set;
+        brightness = g_brightness;
         g_brightness_set = true;
         for (int k = 0; k < m->keys(); ++k) {
             Canvas c(m->key_px, m->key_px);
@@ -135,7 +138,7 @@ void draw() {
         }
     }
     if (set_brightness) {
-        auto b = brightness_report(*m, kBrightness);
+        auto b = brightness_report(*m, brightness);
         usb_bridge::set_feature(b.data(), b.size());
     }
     std::vector<uint8_t> img;
@@ -280,6 +283,13 @@ void set_net(const NetInfo& n) {
     wake();
 }
 
+void set_brightness(int percent) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_brightness = percent < 0 ? 0 : percent > 100 ? 100 : percent;
+    g_brightness_set = false;
+    wake();
+}
+
 void set_hotspot(const Hotspot& h) {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_hotspot = h;
@@ -355,10 +365,18 @@ void host_feature(const uint8_t* report, size_t len) {
 }
 
 void observe_input(const uint8_t* report, size_t len) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    if (!g_model) return;
-    auto keys = key_states(*g_model, report, len);
-    if (keys.size() == g_pressed.size()) g_pressed = keys;
+    std::vector<std::pair<int, bool>> changes;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (!g_model) return;
+        auto keys = key_states(*g_model, report, len);
+        if (keys.size() != g_pressed.size()) return;
+        for (size_t k = 0; k < keys.size(); ++k)
+            if ((keys[k] != 0) != (g_pressed[k] != 0)) changes.emplace_back(static_cast<int>(k), keys[k] != 0);
+        g_pressed = keys;
+    }
+    if (g_cb.on_key)
+        for (const auto& [k, down] : changes) g_cb.on_key(k, down);
 }
 
 std::vector<uint8_t> key_image(int key, std::string& content_type) {
@@ -374,9 +392,22 @@ std::string deck_json() {
     const bool dock = owns_locked();
     char head[256];
     std::snprintf(head, sizeof(head),
-                  "{\"attached\":true,\"model\":\"%s\",\"cols\":%d,\"rows\":%d,\"key_px\":%d,\"transform\":\"%s\",\"source\":\"%s\",\"keys\":[",
-                  g_model->name, g_model->cols, g_model->rows, g_model->key_px, css_transform(*g_model), dock ? "dock" : "app");
+                  "{\"attached\":true,\"model\":\"%s\",\"cols\":%d,\"rows\":%d,\"key_px\":%d,\"transform\":\"%s\",\"source\":\"%s\",\"brightness\":%d",
+                  g_model->name, g_model->cols, g_model->rows, g_model->key_px, css_transform(*g_model), dock ? "dock" : "app", g_brightness);
     std::string j = head;
+    if (usb_bridge::attached()) {
+        const auto info = usb_bridge::info();
+        auto clean = [](const std::string& in) {  // USB strings: keep them printable and JSON-safe
+            std::string o;
+            for (char c : in)
+                if (c >= 0x20 && c < 0x7f && c != '"' && c != '\\') o += c;
+            return o;
+        };
+        char rev[16];
+        std::snprintf(rev, sizeof(rev), "%x.%02x", info.bcd_device >> 8, info.bcd_device & 0xff);
+        j += ",\"product\":\"" + clean(info.product) + "\",\"serial\":\"" + clean(info.serial) + "\",\"usb_rev\":\"" + rev + "\"";
+    }
+    j += ",\"keys\":[";
     for (int k = 0; k < g_model->keys(); ++k) {
         char b[64];
         if (dock) {

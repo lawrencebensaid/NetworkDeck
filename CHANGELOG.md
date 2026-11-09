@@ -8,8 +8,11 @@ adds a line under "Unreleased"; the release that raises `VERSION` renames that s
 
 ### Added
 - A new web interface: the Stream Deck on the dock is shown live in the middle, with what the
-  Stream Deck app (or the dock) has on its keys and which key is pressed. Network, Wi-Fi, firmware,
-  security and diagnostics open as side panels.
+  Stream Deck app (or the dock) has on its keys and which key is pressed. Lights in the top bar show
+  the deck and the network; the settings and the integrations open as windows.
+- The brightness of the dock's own screens on the deck can be set in the web interface.
+- Matter: add the dock to Home Assistant, Apple Home or Google Home with the QR code in the web
+  interface (Integrations). Each key is a button there (press, release, long press) for automations.
 
 ### Changed
 - Key images reach the deck about six times faster: full-deck redraws went from 3–4 to over 20 a second.

@@ -12,6 +12,7 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
+#include "matter.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
@@ -109,6 +110,8 @@ void actions_task(void*) {
                 if (ask("Factory reset?")) {
                     settings::factory_reset();
                     vTaskDelay(pdMS_TO_TICKS(300));
+                    // Matter's own storage goes too: it leaves every controller and restarts by itself.
+                    if (matter::status().running && matter::unpair() == ESP_OK) vTaskDelay(pdMS_TO_TICKS(5000));
                     esp_restart();
                 }
                 break;
@@ -145,6 +148,23 @@ std::string status_json() {
     return j;
 }
 
+std::string matter_json() {
+    const auto m = matter::status();
+    std::string j = "{\"running\":" + std::string(m.running ? "true" : "false");
+    j += ",\"fabrics\":" + std::to_string(m.fabrics);
+    j += ",\"window_open\":" + std::string(m.window_open ? "true" : "false");
+    j += ",\"window_seconds\":" + std::to_string(m.window_seconds);
+    j += ",\"qr\":\"" + m.qr + "\",\"manual\":\"" + m.manual + "\"}";  // base38 and digits: nothing to escape
+    return j;
+}
+
+// Leaving every controller restarts the dock: give the web reply a moment to go out first.
+void matter_unpair_task(void*) {
+    vTaskDelay(pdMS_TO_TICKS(500));
+    matter::unpair();
+    vTaskDelete(nullptr);
+}
+
 }  // namespace
 
 extern "C" void app_main(void) {
@@ -172,7 +192,9 @@ extern "C" void app_main(void) {
     deck_ui::Callbacks ui_cb;
     ui_cb.on_event = [](const deck_ui::UiEvent& ev) { xQueueSend(g_actions, &ev, 0); };
     ui_cb.on_replug = [] { dock_server::replug(); };
+    ui_cb.on_key = [](int key, bool down) { matter::key(static_cast<unsigned>(key), down); };
     deck_ui::start(ui_cb);
+    deck_ui::set_brightness(settings::deck_brightness());
 
     ESP_ERROR_CHECK(net::start(g_name, publish_net));
     publish_net(net::status());
@@ -191,6 +213,7 @@ extern "C" void app_main(void) {
     cb.on_attach = [](const usb_bridge::DeckInfo& info) {
         dock_server::deck_attached(info);
         deck_ui::deck_attached(info.pid);
+        if (const auto* m = deck_ui::find_model(info.pid)) matter::remember_keys(static_cast<unsigned>(m->keys()));
     };
     cb.on_detach = [] {
         ESP_LOGI(TAG, "deck unplugged");
@@ -209,6 +232,10 @@ extern "C" void app_main(void) {
 
     ESP_ERROR_CHECK(net::start_mdns(g_name, identity.serial, cora::kDockPort));
 
+    // Home Assistant and other Matter controllers: one switch per key (a Stream Deck MK.2 until a deck
+    // has been seen). Not fatal: the dock works without it.
+    if (esp_err_t err = matter::start(15, g_name); err != ESP_OK) ESP_LOGE(TAG, "Matter did not start: %s", esp_err_to_name(err));
+
     web::Hooks hooks;
     hooks.status_json = status_json;
     hooks.deck_json = deck_ui::deck_json;
@@ -225,6 +252,16 @@ extern "C" void app_main(void) {
         net::join(w);
     };
     hooks.set_network = apply_network;
+    hooks.set_brightness = [](int percent) {
+        settings::set_deck_brightness(percent);
+        deck_ui::set_brightness(percent);
+    };
+    hooks.matter_json = matter_json;
+    hooks.matter_open = [] { return matter::open_window() == ESP_OK; };
+    hooks.matter_unpair = [] {
+        if (!matter::status().running) return false;
+        return xTaskCreate(matter_unpair_task, "unpair", 4096, nullptr, 5, nullptr) == pdPASS;
+    };
     ESP_ERROR_CHECK(web::start(hooks));
 
     // The new image started its network and services: keep it (otherwise the bootloader rolls back).
