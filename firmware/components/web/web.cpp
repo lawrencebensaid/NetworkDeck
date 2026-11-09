@@ -162,11 +162,23 @@ void set_session_cookie(httpd_req_t* req, const std::string& token) {
 
 // Every request but the page and sign-in needs a session. Changes also need the X-NetworkDeck header,
 // which a page on another site cannot send without a preflight the dock never answers.
-// An "Authorization: Bearer ndk_…" header with a valid API key. Its first use since the start is logged.
+// The REST API connector. Off until it is turned on in Connectors; a dock that had API keys before the
+// switch existed keeps it on.
+bool rest_on() {
+    const int v = settings::rest_api();
+    if (v >= 0) return v == 1;
+    const bool on = !auth::api_keys().empty();
+    settings::set_rest_api(on);
+    return on;
+}
+
+// An "Authorization: Bearer ndk_…" header with a valid API key, while the REST API is on. Its first use
+// since the start is logged.
 bool api_key_ok(httpd_req_t* req) {
     char v[80];
     if (httpd_req_get_hdr_value_str(req, "Authorization", v, sizeof(v)) != ESP_OK) return false;
     if (std::strncmp(v, "Bearer ", 7) != 0) return false;
+    if (!rest_on()) return false;
     auth::ApiKey who;
     if (!auth::api_key_check(v + 7, who)) {
         eventlog::add(Cat::Security, Level::Warn, "Rejected an unknown API key from %s", peer_ip(req).c_str());
@@ -589,6 +601,22 @@ esp_err_t update_work(httpd_req_t* req) {
 
 // ── API keys ────────────────────────────────────────────────────────────────
 
+// GET /api/rest: {"enabled"}. POST value=1|0 turns the REST API on or off (from the web interface).
+esp_err_t rest_get(httpd_req_t* req) {
+    if (!allowed(req, false)) return ESP_OK;
+    return send_json(req, std::string("{\"enabled\":") + (rest_on() ? "true" : "false") + "}");
+}
+
+esp_err_t rest_post(httpd_req_t* req) {
+    if (!allowed(req, true)) return ESP_OK;
+    std::string body;
+    if (!read_form(req, body)) return result(req, false, "Bad request", "400 Bad Request");
+    const bool on = field(body, "value") == "1";
+    settings::set_rest_api(on);
+    eventlog::add(Cat::Security, Level::Info, "REST API turned %s from %s", on ? "on" : "off", peer_ip(req).c_str());
+    return result(req, true, on ? "The REST API is on" : "The REST API is off: API keys are refused");
+}
+
 esp_err_t keys_get(httpd_req_t* req) {
     if (!allowed(req, false)) return ESP_OK;
     std::string j = "[";
@@ -603,6 +631,7 @@ esp_err_t keys_get(httpd_req_t* req) {
 // Making a key is confirmed on the deck, so it also works without signing in: whoever presses ✓ is at
 // the dock (that is how a script gets its first key).
 esp_err_t key_create_work(httpd_req_t* req) {
+    if (!rest_on()) return result(req, false, "Turn on the REST API first (Connectors → REST API)");
     std::string body;
     if (!read_form(req, body)) return result(req, false, "Bad request", "400 Bad Request");
     std::string name = field(body, "name");
@@ -643,16 +672,6 @@ esp_err_t log_get(httpd_req_t* req) {
         if (httpd_query_key_value(q, "limit", v, sizeof(v)) == ESP_OK) limit = std::strtoul(v, nullptr, 10);
     }
     return send_json(req, eventlog::json(before, limit));
-}
-
-esp_err_t finish_post(httpd_req_t* req) {
-    if (!allowed(req, true)) return ESP_OK;
-    std::string body;
-    if (!read_form(req, body)) return result(req, false, "Bad request", "400 Bad Request");
-    const std::string f = field(body, "value");
-    if (f != "black" && f != "white") return result(req, false, "The finish is black or white");
-    if (!g_hooks.set_deck_finish || !g_hooks.set_deck_finish(f)) return result(req, false, "No Stream Deck plugged in");
-    return result(req, true, "Shown in " + f);
 }
 
 // Changes can wait up to 30 s for an answer on the deck. The server has a single task, so those
@@ -777,11 +796,12 @@ esp_err_t start(const Hooks& hooks) {
         {"/api/passkey/delete", HTTP_POST, passkey_delete_post, nullptr},
         {"/api/passkey/login/options", HTTP_POST, passkey_login_options_post, nullptr},
         {"/api/passkey/login", HTTP_POST, passkey_login_post, nullptr},
+        {"/api/rest", HTTP_GET, rest_get, nullptr},
+        {"/api/rest", HTTP_POST, rest_post, nullptr},
         {"/api/keys", HTTP_GET, keys_get, nullptr},
         {"/api/keys", HTTP_POST, key_create_post, nullptr},
         {"/api/keys/delete", HTTP_POST, key_delete_post, nullptr},
         {"/api/log", HTTP_GET, log_get, nullptr},
-        {"/api/deck/finish", HTTP_POST, finish_post, nullptr},
     };
     for (const auto& u : uris) {
         httpd_register_uri_handler(server, &u);

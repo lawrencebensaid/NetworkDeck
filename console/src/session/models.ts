@@ -145,13 +145,17 @@ export function hardware(pid: number | undefined, cols?: number, rows?: number, 
 }
 
 /*
- * The finish of the deck that is plugged in. A black and a white deck of one model have the same USB ids,
- * and neither USB nor Elgato's HID reports carry a colour, so the dock remembers what was chosen for each
- * deck (by serial, in the Stream Deck panel). Until then: a product string that says "white", or the
- * model's own finish.
+ * The finish of the deck that is plugged in, from its serial number. Neither USB nor Elgato's HID reports
+ * carry a colour, and Elgato's own app knows one model code per deck (20GBA9901 for every MK.2), but the
+ * serial does: Elgato serials of the form A00<code>… carry a two-letter product code at characters 4–5,
+ * and white editions have their own. Known white codes below; anything else is drawn in the model's
+ * finish.
+ *   TA: Stream Deck MK.2, white (A00TA3422LRSUR)
  */
-export function finishOf(h: Hardware, chosen?: string, product?: string): Finish {
-  if (chosen === "white" || chosen === "black") return chosen
-  if (product && /\bwhite\b/i.test(product)) return "white"
+const WHITE_CODES = new Set(["TA"])
+
+export function finishOf(h: Hardware, serial?: string): Finish {
+  const code = serial && /^A00[A-Z]{2}/.test(serial) ? serial.slice(3, 5) : ""
+  if (WHITE_CODES.has(code)) return "white"
   return h.finish
 }

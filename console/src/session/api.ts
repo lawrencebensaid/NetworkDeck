@@ -43,8 +43,7 @@ export interface Status {
   host: boolean;
   host_ip: string; /* the computer running the Stream Deck app, empty when none */
   host_seconds: number; /* connected this long */
-  host_name?: string; /* the computer's own name, as it announces itself ("Lawrence's MacBook Pro") */
-  host_model?: string; /* its model code (MacBookPro18,1), when announced */
+  host_name?: string; /* the computer's name: the router's reverse DNS, else its NetBIOS name */
   deck: string;
 }
 
@@ -57,7 +56,6 @@ export interface Deck {
   attached: boolean;
   pid?: number; /* USB product id */
   live?: boolean; /* false: a deck the dock bridges but can't show the keys of */
-  finish?: "black" | "white" | ""; /* as chosen for this deck (by serial); empty: not chosen */
   quiet_ms?: number; /* since the Stream Deck app last changed a key */
   model?: string;
   cols?: number;
@@ -172,7 +170,8 @@ export const api = {
   wifiEnabled: (on: boolean) => post("/api/wifi/enabled", { value: on ? "1" : "0" }),
   wifiForget: () => post("/api/wifi/forget"),
   hostname: (value: string) => post("/api/hostname", { value }),
-  finish: (value: "black" | "white") => post("/api/deck/finish", { value }),
+  rest: () => get<{ enabled: boolean }>("/api/rest"),
+  setRest: (on: boolean) => post("/api/rest", { value: on ? "1" : "0" }),
   keys: () => get<ApiKeyInfo[]>("/api/keys"),
   keyCreate: (name: string) => post("/api/keys", { name }) as Promise<ApiKeyMade>,
   keyDelete: (id: string) => post("/api/keys/delete", { id }),

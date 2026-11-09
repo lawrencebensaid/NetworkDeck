@@ -10,7 +10,6 @@ import { Button } from "@/components/ui/button"
 import { Dialog, DialogClose, DialogContent, DialogDescription, DialogTitle } from "@/components/ui/dialog"
 import { cn } from "@/lib/utils"
 import AboutPanel from "../panels/AboutPanel.vue"
-import ApiKeysPanel from "../panels/ApiKeysPanel.vue"
 import AppearancePanel from "../panels/AppearancePanel.vue"
 import FirmwarePanel from "../panels/FirmwarePanel.vue"
 import NetworkPanel from "../panels/NetworkPanel.vue"
@@ -35,7 +34,6 @@ const sections = computed<Section[]>(() => [
     : []),
   { id: "firmware", title: "Firmware", blurb: "What runs on the dock, and installing an update.", view: FirmwarePanel },
   { id: "users", title: "Users", blurb: "Who signs in to this web interface, and how: a password or passkeys.", view: UsersPanel },
-  { id: "api", title: "API keys", blurb: "For scripts and tools that use the dock's REST API.", view: ApiKeysPanel },
   { id: "appearance", title: "Appearance", blurb: "How this page looks in this browser.", view: AppearancePanel },
 ])
 const extra: Section[] = [{ id: "about", title: "About", blurb: "What the dock says of itself.", view: AboutPanel }]

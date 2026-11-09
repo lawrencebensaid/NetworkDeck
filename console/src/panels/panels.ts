@@ -1,4 +1,4 @@
-/* The panels the rail opens beside the deck. Settings and integrations are dialogs (see ConsoleView). */
+/* The panels the rail opens beside the deck. Settings and connectors are dialogs (see ConsoleView). */
 export type PanelId = "deck" | "matter";
 
 export const PANELS: Record<PanelId, { title: string }> = {

@@ -32,11 +32,6 @@ Wifi wifi();
 void set_wifi(const Wifi& w);
 
 // Brightness of the dock's own screens on the deck, 0..100 (the Stream Deck app sets its own).
-// How the web interface draws a deck: "black", "white", or empty when not chosen. Per deck serial
-// (USB doesn't tell a deck's colour), at most 8 decks remembered.
-std::string deck_finish(const std::string& serial);
-void set_deck_finish(const std::string& serial, const std::string& finish);
-
 int deck_brightness();
 void set_deck_brightness(int percent);
 
@@ -47,6 +42,10 @@ void set_hostname(const std::string& h);
 bool valid_hostname(const std::string& h);
 
 // Matter was set up (it runs from the next start, and from now on).
+// The REST API connector (API keys accepted): 1 on, 0 off, -1 never set.
+int rest_api();
+void set_rest_api(bool on);
+
 bool matter_enabled();
 void set_matter_enabled(bool on);
 

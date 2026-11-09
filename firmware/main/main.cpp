@@ -226,7 +226,7 @@ std::string status_json() {
     {
         const auto h = dock_server::host();
         j += ",\"host_ip\":\"" + h.ip + "\",\"host_seconds\":" + std::to_string(h.seconds);
-        j += ",\"host_name\":\"" + json_escape(h.name) + "\",\"host_model\":\"" + json_escape(h.model) + "\"";
+        j += ",\"host_name\":\"" + json_escape(h.name) + "\"";
     }
     j += ",\"deck\":\"" + std::string(deck_name) + "\"}";
     return j;
@@ -246,11 +246,11 @@ std::string matter_json() {
 // Leaving every controller restarts the dock: give the web reply a moment to go out first.
 std::string g_last_host;  // "Lawrence's MacBook Pro (10.0.1.137)", for the disconnect entry
 
-// Who connected: the computer's own name over Bonjour, then logged.
+// Who connected: the computer's name (the router's reverse DNS, else NetBIOS), then logged.
 void describe_host_task(void*) {
     const std::string ip = dock_server::host().ip;
     const net::Peer p = ip.empty() ? net::Peer{} : net::describe(ip);
-    dock_server::set_host_info(ip, p.name, p.model, p.hostname);
+    dock_server::set_host_info(ip, p.name, p.hostname);
     g_last_host = p.name.empty() ? ip : p.name + " (" + ip + ")";
     eventlog::add(Cat::Connection, Level::Info, "Stream Deck app connected from %s", g_last_host.c_str());
     vTaskDelete(nullptr);
@@ -416,20 +416,7 @@ extern "C" void app_main(void) {
     web::Hooks hooks;
     hooks.status_json = status_json;
     hooks.hostname = [] { return net::hostname(); };
-    hooks.deck_json = [] {
-        // The finish chosen for this deck, by serial (USB doesn't say a deck's colour).
-        std::string j = deck_ui::deck_json();
-        if (usb_bridge::attached() && j.size() > 1 && j.back() == '}') {
-            const std::string f = settings::deck_finish(usb_bridge::info().serial);
-            j.insert(j.size() - 1, ",\"finish\":\"" + f + "\"");
-        }
-        return j;
-    };
-    hooks.set_deck_finish = [](const std::string& f) {
-        if (!usb_bridge::attached()) return false;
-        settings::set_deck_finish(usb_bridge::info().serial, f);
-        return true;
-    };
+    hooks.deck_json = deck_ui::deck_json;
     hooks.scan = [] {
         std::vector<web::Network> out;
         for (const auto& r : net::scan()) out.push_back({r.ssid, r.rssi, r.secure});

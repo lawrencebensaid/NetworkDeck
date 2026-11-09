@@ -88,13 +88,14 @@ async function install() {
 }
 
 const size = (n: number) => `${(n / 1024 / 1024).toFixed(1)} MB`
+import { versionKind, versionLabel } from "@/lib/version"
 </script>
 
 <template>
   <div class="flex flex-col gap-5">
     <dl class="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1.5 text-sm">
-      <dt class="text-muted-foreground">Build</dt>
-      <dd class="font-mono">{{ store.status?.build ?? "–" }}</dd>
+      <dt class="text-muted-foreground">Version</dt>
+      <dd><span class="font-mono">{{ versionLabel(store.status?.build) }}</span> <span class="text-muted-foreground">· {{ versionKind(store.status?.build) }}</span></dd>
       <dt class="text-muted-foreground">Reported to the app</dt>
       <dd class="font-mono">{{ store.status?.firmware ?? "–" }}</dd>
     </dl>
@@ -129,7 +130,7 @@ const size = (n: number) => `${(n / 1024 / 1024).toFixed(1)} MB`
         <div class="min-w-0 flex-1">
           <div class="truncate font-medium">{{ file.name }}</div>
           <div v-if="problem" class="text-destructive">{{ problem }}</div>
-          <div v-else-if="version" class="text-muted-foreground">Version {{ version }} · {{ size(file.size) }}</div>
+          <div v-else-if="version" class="text-muted-foreground">{{ versionLabel(version) }} · {{ versionKind(version) }} · {{ size(file.size) }}</div>
         </div>
         <Button v-if="!busy" variant="ghost" size="icon-sm" aria-label="Choose another file" @click="clear"><X /></Button>
       </div>
@@ -143,6 +144,6 @@ const size = (n: number) => `${(n / 1024 / 1024).toFixed(1)} MB`
     <Progress v-if="stage === 'uploading'" :model-value="progress" />
     <p v-if="stage === 'confirming' && !store.viaHotspot" class="flex items-center gap-2 text-sm" role="status"><Spinner class="size-4" /> Checking it. Then confirm on the Stream Deck: press ✓.</p>
     <p v-if="stage === 'restarting'" class="flex items-center gap-2 text-sm" role="status"><Spinner class="size-4" /> Restarting with the new firmware…</p>
-    <Button :disabled="!file || !!problem || !version || busy" @click="install">{{ version ? `Install ${version}` : "Install" }}</Button>
+    <Button :disabled="!file || !!problem || !version || busy" @click="install">{{ version ? `Install ${versionLabel(version)}` : "Install" }}</Button>
   </div>
 </template>

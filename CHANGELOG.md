@@ -12,11 +12,14 @@ adds a line under "Unreleased"; the release that raises `VERSION` renames that s
 - Logs: what the dock did (starts and why, crashes, updates, sign-ins, API keys, network changes, the
   Stream Deck app connecting, decks plugged in, Matter), kept in the dock's flash through restarts and
   power loss, 8160 entries. With filters, search and download; the protocol trace is in there too.
-- The REST API, with API keys (Settings → API keys) sent as `Authorization: Bearer`; documented in
-  `docs/api.md`. A key can also be made by confirming on the deck, without signing in.
-- The web interface names the computer the Stream Deck app connected from ("Lawrence's MacBook Pro ·
-  MacBook Pro"), as it announces itself on the network.
-- Each Stream Deck's finish (black or white) is remembered by the dock, set once in the Stream Deck panel.
+- Connectors (was Integrations): each service is switched on there. The REST API is new: on or off,
+  with its API keys (sent as `Authorization: Bearer`), documented in `docs/api.md`. A key can also be
+  made by confirming on the deck, without signing in.
+- The web interface names the computer the Stream Deck app connected from: the name your router has
+  for it (reverse DNS), or the computer's own network name (NetBIOS).
+- A white Stream Deck MK.2 is drawn white, recognised by its serial number.
+- Versions say what a build is: `0.2.0` a release, `0.2.0-beta.N` a build of develop, `0.2.0-pr.4.N`
+  a test build of a pull request, `0.2.0-dev+<commit>` a local build.
 - The dock keeps its clock from the network (log times).
 - A new web interface: the Stream Deck on the dock is shown live in the middle, with what the
   Stream Deck app (or the dock) has on its keys and which key is pressed. Lights in the top bar show

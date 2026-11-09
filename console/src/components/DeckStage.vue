@@ -26,7 +26,7 @@ const { width, height } = useElementSize(stage)
 
 const deck = computed(() => store.deck)
 const hw = computed(() => hardware(deck.value?.pid, deck.value?.cols, deck.value?.rows, deck.value?.model))
-const finish = computed(() => finishOf(hw.value, deck.value?.finish, deck.value?.product))
+const finish = computed(() => finishOf(hw.value, deck.value?.serial))
 
 /* What the keys show now: committed a page at a time. */
 interface Face {

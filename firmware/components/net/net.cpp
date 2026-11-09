@@ -19,6 +19,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "lwip/ip4_addr.h"
+#include "lwip/sockets.h"
 #include "mdns.h"
 #include "eventlog.hpp"
 
@@ -538,52 +539,142 @@ std::string hostname() {
 }
 
 namespace {
-bool has_ip(const mdns_result_t* r, uint32_t ip) {
-    for (const mdns_ip_addr_t* a = r->addr; a; a = a->next)
-        if (a->addr.type == ESP_IPADDR_TYPE_V4 && a->addr.u_addr.ip4.addr == ip) return true;
-    return false;
+
+// One UDP question and its answer (or nothing within `ms`).
+int udp_ask(uint32_t ip_be, uint16_t port, const uint8_t* q, size_t qlen, uint8_t* out, size_t cap, int ms) {
+    const int fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (fd < 0) return -1;
+    timeval tv{ms / 1000, (ms % 1000) * 1000};
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    sockaddr_in to{};
+    to.sin_family = AF_INET;
+    to.sin_port = htons(port);
+    to.sin_addr.s_addr = ip_be;
+    int n = -1;
+    if (sendto(fd, q, qlen, 0, reinterpret_cast<sockaddr*>(&to), sizeof(to)) == static_cast<int>(qlen))
+        n = static_cast<int>(recv(fd, out, cap, 0));
+    close(fd);
+    return n;
 }
 
-// Services computers announce, best first: AirPlay names the computer and its model.
-bool find_peer(const char* service, uint32_t ip, Peer& p) {
-    mdns_result_t* results = nullptr;
-    if (mdns_query_ptr(service, "_tcp", 1500, 24, &results) != ESP_OK || !results) return false;
-    bool found = false;
-    for (mdns_result_t* r = results; r && !found; r = r->next) {
-        bool match = has_ip(r, ip);
-        if (!match && r->hostname) {  // no address in the answer: ask for the host's
-            esp_ip4_addr_t a{};
-            match = mdns_query_a(r->hostname, 700, &a) == ESP_OK && a.addr == ip;
+// A DNS name at `at` (with compression), as dotted text.
+bool dns_name(const uint8_t* m, int len, int at, std::string& out, int depth = 0) {
+    while (at < len && depth < 8) {
+        const uint8_t l = m[at];
+        if (l == 0) return true;
+        if ((l & 0xC0) == 0xC0) {
+            if (at + 1 >= len) return false;
+            return dns_name(m, len, ((l & 0x3F) << 8) | m[at + 1], out, depth + 1);
         }
-        if (!match) continue;
-        found = true;
-        if (r->instance_name) {
-            p.name = r->instance_name;
-            const size_t at = p.name.find('@');  // "028CC23638C5@Lawrence's MacBook Pro" (_raop)
-            if (at != std::string::npos) p.name.erase(0, at + 1);
-        }
-        if (r->hostname) p.hostname = r->hostname;
-        for (size_t i = 0; i < r->txt_count; ++i)
-            if (r->txt[i].key && r->txt[i].value && (std::strcmp(r->txt[i].key, "model") == 0 || std::strcmp(r->txt[i].key, "am") == 0))
-                p.model = r->txt[i].value;
+        if (at + 1 + l > len) return false;
+        if (!out.empty()) out += '.';
+        out.append(reinterpret_cast<const char*>(m + at + 1), l);
+        at += 1 + l;
     }
-    mdns_query_results_free(results);
-    return found;
+    return false;
 }
+int dns_skip(const uint8_t* m, int len, int at) {
+    while (at < len) {
+        if (m[at] == 0) return at + 1;
+        if ((m[at] & 0xC0) == 0xC0) return at + 2;
+        at += 1 + m[at];
+    }
+    return len;
+}
+
+// The name the network's DNS server (usually the router, from the DHCP leases) gives the address.
+std::string reverse_dns(uint32_t ip_be, uint32_t dns_be) {
+    const uint8_t* b = reinterpret_cast<const uint8_t*>(&ip_be);
+    uint8_t q[64] = {0x4e, 0x44, 0x01, 0x00, 0, 1, 0, 0, 0, 0, 0, 0};  // id, recursion desired, 1 question
+    size_t n = 12;
+    char label[4];
+    for (int i = 3; i >= 0; --i) {
+        const int l = std::snprintf(label, sizeof(label), "%u", b[i]);
+        q[n++] = static_cast<uint8_t>(l);
+        std::memcpy(q + n, label, l);
+        n += l;
+    }
+    for (const char* part : {"in-addr", "arpa"}) {
+        const size_t l = std::strlen(part);
+        q[n++] = static_cast<uint8_t>(l);
+        std::memcpy(q + n, part, l);
+        n += l;
+    }
+    q[n++] = 0;
+    const uint8_t tail[] = {0, 12, 0, 1};  // PTR, IN
+    std::memcpy(q + n, tail, 4);
+    n += 4;
+    uint8_t r[512];
+    const int len = udp_ask(dns_be, 53, q, n, r, sizeof(r), 1200);
+    if (len < 12 || r[0] != 0x4e || r[1] != 0x44 || (r[3] & 0x0F) != 0) return {};
+    const int answers = (r[6] << 8) | r[7];
+    int at = dns_skip(r, len, 12) + 4;
+    for (int i = 0; i < answers && at + 10 <= len; ++i) {
+        at = dns_skip(r, len, at);
+        if (at + 10 > len) break;
+        const int type = (r[at] << 8) | r[at + 1];
+        const int rdlen = (r[at + 8] << 8) | r[at + 9];
+        at += 10;
+        if (type == 12) {
+            std::string name;
+            if (dns_name(r, len, at, name) && !name.empty()) return name;
+        }
+        at += rdlen;
+    }
+    return {};
+}
+
+// The computer's own NetBIOS name (Windows, and Macs with file sharing on): a node status request.
+std::string netbios_name(uint32_t ip_be) {
+    uint8_t q[50] = {0x4e, 0x42, 0x00, 0x00, 0, 1, 0, 0, 0, 0, 0, 0, 0x20};
+    q[13] = 'C';
+    q[14] = 'K';  // "*" encoded, then 15 NULs as 'AA'
+    for (int i = 15; i < 45; ++i) q[i] = 'A';
+    q[45] = 0;
+    q[46] = 0;
+    q[47] = 0x21;  // NBSTAT
+    q[48] = 0;
+    q[49] = 1;     // IN
+    uint8_t r[600];
+    const int len = udp_ask(ip_be, 137, q, sizeof(q), r, sizeof(r), 800);
+    if (len < 57 || r[0] != 0x4e || r[1] != 0x42) return {};
+    int at = dns_skip(r, len, 12) + 10;  // name, type, class, ttl, rdlength
+    if (at >= len) return {};
+    const int count = r[at++];
+    for (int i = 0; i < count && at + 18 <= len; ++i, at += 18) {
+        const uint8_t suffix = r[at + 15];
+        const bool group = r[at + 16] & 0x80;
+        if (suffix != 0x00 || group) continue;  // the workstation name
+        std::string name(reinterpret_cast<const char*>(r + at), 15);
+        while (!name.empty() && name.back() == ' ') name.pop_back();
+        if (!name.empty()) return name;
+    }
+    return {};
+}
+
 }  // namespace
 
 Peer describe(const std::string& ip) {
     Peer p;
     esp_ip4_addr_t a{};
     if (esp_netif_str_to_ip4(ip.c_str(), &a) != ESP_OK) return p;
-    for (const char* service : {"_airplay", "_companion-link", "_ssh", "_rfb", "_smb", "_device-info"}) {
-        Peer q;
-        if (!find_peer(service, a.addr, q)) continue;
-        if (p.name.empty()) p.name = q.name;
-        if (p.model.empty()) p.model = q.model;
-        if (p.hostname.empty()) p.hostname = q.hostname;
-        if (!p.name.empty() && !p.model.empty()) break;
+    // The DNS server of the link we are on.
+    esp_netif_t* netif = nullptr;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        netif = g_eth_link && !g_eth_ip.empty() ? g_eth_netif : g_sta_netif;
     }
+    esp_netif_dns_info_t dns{};
+    if (netif && esp_netif_get_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns) == ESP_OK && dns.ip.type == ESP_IPADDR_TYPE_V4 &&
+        dns.ip.u_addr.ip4.addr != 0) {
+        std::string name = reverse_dns(a.addr, dns.ip.u_addr.ip4.addr);
+        if (!name.empty()) {
+            p.hostname = name;
+            const size_t dot = name.find('.');  // "MacBookPro.lan" -> "MacBookPro"
+            p.name = dot == std::string::npos ? name : name.substr(0, dot);
+        }
+    }
+    if (p.name.empty()) p.name = netbios_name(a.addr);
     return p;
 }
 

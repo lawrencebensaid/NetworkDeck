@@ -40,11 +40,10 @@ header is not needed.
 
 | Method | Path | What |
 |---|---|---|
-| GET | `/api/status` | The dock: name, serial, firmware, link, IP, Wi-Fi, hostname, addressing, and the Stream Deck app's computer (`host`, `host_ip`, `host_name`, `host_model`, `host_seconds`). |
-| GET | `/api/deck` | The deck on the USB port: `attached`, `pid`, `model`, `serial`, `cols`, `rows`, `key_px`, `finish`, who draws (`source`: `app` or `dock`), each key's version or colour (`keys`), which keys are pressed (`pressed`), and `quiet_ms` since the app last changed a key. |
+| GET | `/api/status` | The dock: name, serial, firmware, link, IP, Wi-Fi, hostname, addressing, and the Stream Deck app's computer (`host`, `host_ip`, `host_name`, `host_seconds`; the name from the router's reverse DNS or the computer's NetBIOS name). |
+| GET | `/api/deck` | The deck on the USB port: `attached`, `pid`, `model`, `serial`, `cols`, `rows`, `key_px`, who draws (`source`: `app` or `dock`), each key's version or colour (`keys`), which keys are pressed (`pressed`), and `quiet_ms` since the app last changed a key. |
 | GET | `/api/key?n=<key>&v=<version>` | The image on a key (JPEG or BMP, in the deck's orientation; `transform` in `/api/deck` turns it upright). `204` for a key with no image. |
 | POST | `/api/deck/brightness` | `value` 0–100: the brightness of the dock's own screens. |
-| POST | `/api/deck/finish` | `value` `black` or `white`: how the web interface draws this deck (remembered by serial). |
 
 ### Log
 

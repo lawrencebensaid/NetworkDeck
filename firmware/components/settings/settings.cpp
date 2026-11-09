@@ -19,6 +19,7 @@ Wifi g_wifi;
 int g_brightness = 70;
 std::string g_hostname;
 bool g_matter = false;
+int g_rest = -1;  // the REST API connector: -1 never set (on if API keys exist, see web)
 
 uint32_t pack(const Ip4& ip) { return (uint32_t(ip[0]) << 24) | (uint32_t(ip[1]) << 16) | (uint32_t(ip[2]) << 8) | ip[3]; }
 Ip4 unpack(uint32_t v) {
@@ -100,45 +101,6 @@ void set_wifi(const Wifi& w) {
     nvs_close(h);
 }
 
-// "SERIAL=w;SERIAL=b;…", newest last.
-std::string deck_finish(const std::string& serial) {
-    nvs_handle_t h;
-    if (serial.empty() || nvs_open(kNs, NVS_READONLY, &h) != ESP_OK) return {};
-    const std::string all = get_str(h, "finish");
-    nvs_close(h);
-    const std::string key = serial + "=";
-    for (size_t at = 0; at < all.size();) {
-        const size_t end = all.find(';', at);
-        const std::string item = all.substr(at, end == std::string::npos ? std::string::npos : end - at);
-        if (item.compare(0, key.size(), key) == 0) return item.substr(key.size()) == "w" ? "white" : "black";
-        if (end == std::string::npos) break;
-        at = end + 1;
-    }
-    return {};
-}
-
-void set_deck_finish(const std::string& serial, const std::string& finish) {
-    std::lock_guard<std::mutex> lock(g_mutex);
-    nvs_handle_t h;
-    if (serial.empty() || serial.find_first_of("=;") != std::string::npos || nvs_open(kNs, NVS_READWRITE, &h) != ESP_OK) return;
-    const std::string all = get_str(h, "finish");
-    std::vector<std::string> items;
-    for (size_t at = 0; at < all.size();) {
-        const size_t end = all.find(';', at);
-        std::string item = all.substr(at, end == std::string::npos ? std::string::npos : end - at);
-        if (!item.empty() && item.compare(0, serial.size() + 1, serial + "=") != 0) items.push_back(item);
-        if (end == std::string::npos) break;
-        at = end + 1;
-    }
-    items.push_back(serial + "=" + (finish == "white" ? "w" : "b"));
-    while (items.size() > 8) items.erase(items.begin());
-    std::string out;
-    for (const auto& i : items) out += (out.empty() ? "" : ";") + i;
-    nvs_set_str(h, "finish", out.c_str());
-    nvs_commit(h);
-    nvs_close(h);
-}
-
 int deck_brightness() {
     std::lock_guard<std::mutex> lock(g_mutex);
     return g_brightness;
@@ -189,6 +151,29 @@ void set_matter_enabled(bool on) {
     nvs_handle_t h;
     if (nvs_open(kNs, NVS_READWRITE, &h) != ESP_OK) return;
     nvs_set_u8(h, "matter", on ? 1 : 0);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+int rest_api() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_rest < 0) {
+        nvs_handle_t h;
+        uint8_t v = 0;
+        if (nvs_open(kNs, NVS_READONLY, &h) == ESP_OK) {
+            if (nvs_get_u8(h, "rest", &v) == ESP_OK) g_rest = v ? 1 : 0;
+            nvs_close(h);
+        }
+    }
+    return g_rest;
+}
+
+void set_rest_api(bool on) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_rest = on ? 1 : 0;
+    nvs_handle_t h;
+    if (nvs_open(kNs, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, "rest", on ? 1 : 0);
     nvs_commit(h);
     nvs_close(h);
 }

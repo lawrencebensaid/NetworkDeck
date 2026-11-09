@@ -44,7 +44,7 @@ Config g_config;
 std::mutex g_mutex;  // guards g_slot and g_child, and keeps Conns alive while others send on them
 Slot g_slot;
 int64_t g_host_since = 0;  // esp_timer time the current host connected
-std::string g_host_name, g_host_model, g_host_hostname;
+std::string g_host_name, g_host_hostname;
 cora::ChildInfo g_child;
 std::atomic<uint8_t> g_conn_no{0};
 std::atomic<bool> g_paused{false};
@@ -257,7 +257,6 @@ void listener_task(void* arg) {
                 if (host_new) {
                     g_host_since = esp_timer_get_time();
                     g_host_name.clear();
-                    g_host_model.clear();
                     g_host_hostname.clear();
                 }
                 g_slot.ip = ip;
@@ -310,16 +309,14 @@ Host host() {
     h.ip = ip_str(g_slot.ip);
     h.seconds = static_cast<uint32_t>((esp_timer_get_time() - g_host_since) / 1000000);
     h.name = g_host_name;
-    h.model = g_host_model;
     h.hostname = g_host_hostname;
     return h;
 }
 
-void set_host_info(const std::string& ip, const std::string& name, const std::string& model, const std::string& hostname) {
+void set_host_info(const std::string& ip, const std::string& name, const std::string& hostname) {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_slot.ip || ip_str(g_slot.ip) != ip) return;
     g_host_name = name;
-    g_host_model = model;
     g_host_hostname = hostname;
 }
 

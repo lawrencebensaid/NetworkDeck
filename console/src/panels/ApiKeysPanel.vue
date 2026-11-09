@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /*
- * API keys: for scripts and tools that use the REST API. A key is made with a name, confirmed on the
+ * API keys (Connectors → REST API): for scripts and tools that use the REST API. A key is made with a name, confirmed on the
  * deck, and shown once; the dock keeps only its hash. Deleting a key stops it at once.
  */
 import { onMounted, ref } from "vue"
@@ -25,6 +25,7 @@ import { Spinner } from "@/components/ui/spinner"
 import { api, type ApiKeyInfo } from "../session/api.ts"
 import { store } from "../session/store.ts"
 
+const emit = defineEmits<{ change: [] }>()
 const keys = ref<ApiKeyInfo[] | null>(null)
 const name = ref("")
 const busy = ref(false)
@@ -34,6 +35,7 @@ const copied = ref(false)
 async function load() {
   try {
     keys.value = await api.keys()
+    emit("change")
   } catch {
     /* signed out or offline */
   }
@@ -90,7 +92,6 @@ const when = (t: number) => (t ? new Date(t * 1000).toLocaleString(undefined, { 
     </section>
 
     <section class="flex flex-col gap-2">
-      <h3 class="text-sm font-medium">Keys</h3>
       <p v-if="keys === null" class="flex items-center gap-2 text-sm text-muted-foreground"><Spinner class="size-4" /> Loading…</p>
       <p v-else-if="!keys.length" class="text-sm text-muted-foreground">No API keys yet.</p>
       <ul v-else class="divide-y rounded-lg border" data-testid="key-list">

@@ -2,7 +2,7 @@
 /*
  * The rail: a slim column of icon buttons down the left, from under the top bar to the bottom. At the
  * top the panels beside the deck: the Stream Deck itself and Matter, then the log. At the bottom the
- * dialogs: the settings, the integrations (Matter, the REST API; MCP later) and the account.
+ * dialogs: the settings, the connectors (Matter, the REST API; MCP later) and the account.
  * On a phone it runs along the bottom.
  */
 import { CircleUser, House, KeyRound, LogOut, Plug, ScrollText, Settings } from "@lucide/vue"
@@ -22,7 +22,7 @@ import RailButton from "./RailButton.vue"
 import TipWrap from "./TipWrap.vue"
 
 defineProps<{ panel: PanelId | null }>()
-defineEmits<{ panel: [id: PanelId]; settings: [section?: string]; integrations: []; logs: [] }>()
+defineEmits<{ panel: [id: PanelId]; settings: [section?: string]; connectors: []; logs: [] }>()
 
 const icons = { deck: DeckIcon, matter: House }
 const order: PanelId[] = ["deck", "matter"]
@@ -60,8 +60,8 @@ const order: PanelId[] = ["deck", "matter"]
         <Settings />
       </RailButton>
     </TipWrap>
-    <TipWrap tip="Integrations" side="right">
-      <RailButton aria-label="Integrations" data-testid="integrations-button" @click="$emit('integrations')">
+    <TipWrap tip="Connectors" side="right">
+      <RailButton aria-label="Connectors" data-testid="connectors-button" @click="$emit('connectors')">
         <Plug />
       </RailButton>
     </TipWrap>

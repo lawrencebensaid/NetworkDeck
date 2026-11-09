@@ -1,7 +1,7 @@
 # Tests and builds every change; a new version on main becomes a GitHub release.
 #
-# Pull requests (into develop): host tests, then the firmware build (VERSION-alpha.pr<n>.<run>), kept as
-# an artifact of the run. Pushes to develop: the same, as VERSION-beta.<run>. Pushes to main (merging
+# Versions are SemVer: a pull request builds VERSION-pr.<n>.<run> (0.2.0-pr.4.57: pull request 4, the
+# workflow's run 57), kept as an artifact of the run; pushes to develop build VERSION-beta.<run>. Pushes to main (merging
 # develop): when VERSION is higher than the last release tag, a GitHub release v<VERSION> with the
 # files to flash. Raise VERSION (and name the CHANGELOG.md section) in the pull request that should
 # release.
@@ -54,7 +54,7 @@ jobs:
                 release=true; echo "Releasing v$base (last release: ${last:-none})."
               fi ;;
             push:refs/heads/develop) version="$base-beta.$GITHUB_RUN_NUMBER" ;;
-            pull_request:*) version="$base-alpha.pr${{ github.event.pull_request.number }}.$GITHUB_RUN_NUMBER" ;;
+            pull_request:*) version="$base-pr.${{ github.event.pull_request.number }}.$GITHUB_RUN_NUMBER" ;;
             *) version="$base-dev.$GITHUB_RUN_NUMBER" ;;
           esac
           echo "version=$version" >> "$GITHUB_OUTPUT"
