@@ -11,6 +11,16 @@ export interface AuthState {
   password_set: boolean;
   signed_in: boolean;
   via_hotspot: boolean;
+  https: boolean; /* this page came over HTTPS */
+  https_available: boolean; /* the dock serves HTTPS */
+  passkey_ready: boolean; /* HTTPS at the dock's name: passkeys work here */
+  passkeys: number;
+  hostname: string;
+}
+
+export interface PasskeyInfo {
+  id: string;
+  name: string;
 }
 
 export interface Status {
@@ -112,6 +122,8 @@ export const api = {
   scan: () => get<WifiNetwork[]>("/api/scan"),
   brightness: (percent: number) => post("/api/deck/brightness", { value: String(percent) }),
   matter: () => get<Matter>("/api/matter"),
+  passkeys: () => get<PasskeyInfo[]>("/api/passkeys"),
+  passkeyDelete: (id: string) => post("/api/passkey/delete", { id }),
   matterSetup: () => post("/api/matter/setup"),
   matterOpen: () => post("/api/matter/open"),
   matterOff: () => post("/api/matter/off"),

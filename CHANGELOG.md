@@ -23,6 +23,11 @@ adds a line under "Unreleased"; the release that raises `VERSION` renames that s
 - Key images reach the deck about six times faster: full-deck redraws went from 3–4 to over 20 a second.
 
 ### Security
+- HTTPS at `https://<name>.local`, with a certificate from the dock's own certificate authority. Trust
+  it once (download it in Settings → Users); it can only vouch for this dock's names and private
+  addresses.
+- Passkeys: sign in with Touch ID, Face ID, a phone or a security key (Settings → Users, at the
+  HTTPS address). Adding one asks for the password again.
 - The web interface and firmware upload need a password. You choose it the first time you open the
   interface and confirm it on the deck; five wrong tries lock sign-in for 30 seconds.
 

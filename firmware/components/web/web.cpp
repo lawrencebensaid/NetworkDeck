@@ -7,8 +7,10 @@
 #include <memory>
 
 #include "auth.hpp"
+#include "tls.h"
 #include "esp_app_desc.h"
 #include "esp_http_server.h"
+#include "esp_https_server.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
@@ -26,6 +28,9 @@ namespace {
 constexpr char TAG[] = "web";
 constexpr char kCookie[] = "nd_session";
 Hooks g_hooks;
+constexpr char kSecure[] = "https";
+std::string g_ca_pem;  // the dock's certificate authority, offered at /ca.pem to trust once
+bool g_https = false;
 
 // Requests from the setup hotspot (192.168.4.x) need no confirmation on the deck: its password is only
 // shown on the deck, so whoever is on it is standing next to the dock.
@@ -67,7 +72,7 @@ esp_err_t result(httpd_req_t* req, bool ok, const std::string& message, const ch
 
 // Reads an application/x-www-form-urlencoded body (small forms only).
 bool read_form(httpd_req_t* req, std::string& body) {
-    if (req->content_len > 2048) return false;
+    if (req->content_len > 4096) return false;
     body.resize(req->content_len);
     size_t got = 0;
     while (got < body.size()) {
@@ -164,11 +169,122 @@ esp_err_t index_get(httpd_req_t* req) {
     return httpd_resp_send(req, reinterpret_cast<const char*>(index_gz_start), index_gz_end - index_gz_start);
 }
 
+bool secure(httpd_req_t* req) { return req->user_ctx == kSecure; }
+
+// Passkeys need the page at the dock's name over HTTPS (WebAuthn takes no IP addresses and no plain
+// HTTP): the relying party id is the Host header's name. True and `rp_id` set when that is so.
+bool passkey_host(httpd_req_t* req, std::string& rp_id) {
+    if (!secure(req)) return false;
+    char host[96] = "";
+    if (httpd_req_get_hdr_value_str(req, "Host", host, sizeof(host)) != ESP_OK) return false;
+    std::string h = host;
+    if (const size_t colon = h.find(':'); colon != std::string::npos) h.resize(colon);
+    if (h.empty() || h.find_first_not_of("0123456789.") == std::string::npos) return false;  // an IPv4 address
+    if (h.front() == '[') return false;                                                       // an IPv6 address
+    for (char& c : h) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    rp_id = h;
+    return true;
+}
+
+std::string origin_of(httpd_req_t* req) {
+    char host[96] = "";
+    httpd_req_get_hdr_value_str(req, "Host", host, sizeof(host));
+    std::string h = host;
+    for (char& c : h) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return "https://" + h;
+}
+
+esp_err_t ca_get(httpd_req_t* req) {
+    if (g_ca_pem.empty()) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "No certificate");
+        return ESP_OK;
+    }
+    httpd_resp_set_type(req, "application/x-pem-file");
+    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"networkdeck-ca.pem\"");
+    return httpd_resp_send(req, g_ca_pem.c_str(), static_cast<ssize_t>(g_ca_pem.size()));
+}
+
+esp_err_t passkeys_get(httpd_req_t* req) {
+    if (!allowed(req, false)) return ESP_OK;
+    std::string j = "[";
+    bool first = true;
+    for (const auto& p : auth::passkeys()) {
+        j += std::string(first ? "" : ",") + "{\"id\":\"" + p.id + "\",\"name\":\"" + json_escape(p.name) + "\"}";
+        first = false;
+    }
+    return send_json(req, j + "]");
+}
+
+esp_err_t passkey_register_options_post(httpd_req_t* req) {
+    if (!allowed(req, true)) return ESP_OK;
+    std::string rp, body;
+    if (!passkey_host(req, rp)) return result(req, false, "Open the dock at https://<name>.local to add a passkey");
+    if (!read_form(req, body)) return result(req, false, "Bad request", "400 Bad Request");
+    // A stolen session must not be able to add a way back in: the password is asked again.
+    if (!auth::check_password(field(body, "password"))) return result(req, false, "The password is wrong", "401 Unauthorized");
+    return send_json(req, auth::passkey_create_options(rp));
+}
+
+esp_err_t passkey_register_post(httpd_req_t* req) {
+    if (!allowed(req, true)) return ESP_OK;
+    std::string rp, body;
+    if (!passkey_host(req, rp)) return result(req, false, "Open the dock at https://<name>.local to add a passkey");
+    if (!read_form(req, body)) return result(req, false, "Bad request", "400 Bad Request");
+    std::string name = field(body, "name");
+    if (name.size() > 64) name.resize(64);
+    if (const char* why = auth::passkey_add(rp, origin_of(req), field(body, "client"), field(body, "attestation"), name))
+        return result(req, false, why);
+    return result(req, true, "Passkey added");
+}
+
+esp_err_t passkey_delete_post(httpd_req_t* req) {
+    if (!allowed(req, true)) return ESP_OK;
+    std::string body;
+    if (!read_form(req, body)) return result(req, false, "Bad request", "400 Bad Request");
+    if (!auth::passkey_remove(field(body, "id"))) return result(req, false, "No such passkey");
+    return result(req, true, "Passkey removed");
+}
+
+esp_err_t passkey_login_options_post(httpd_req_t* req) {
+    char v[8];
+    if (httpd_req_get_hdr_value_str(req, "X-NetworkDeck", v, sizeof(v)) != ESP_OK)
+        return result(req, false, "Missing X-NetworkDeck header", "403 Forbidden");
+    std::string rp;
+    if (!passkey_host(req, rp)) return result(req, false, "Passkeys work at https://<name>.local");
+    if (auth::passkeys().empty()) return result(req, false, "No passkey is set up on the dock");
+    return send_json(req, auth::passkey_get_options(rp));
+}
+
+esp_err_t passkey_login_post(httpd_req_t* req) {
+    char v[8];
+    if (httpd_req_get_hdr_value_str(req, "X-NetworkDeck", v, sizeof(v)) != ESP_OK)
+        return result(req, false, "Missing X-NetworkDeck header", "403 Forbidden");
+    std::string rp, body, token;
+    if (!passkey_host(req, rp)) return result(req, false, "Passkeys work at https://<name>.local");
+    if (!read_form(req, body)) return result(req, false, "Bad request", "400 Bad Request");
+    const char* why = nullptr;
+    switch (auth::passkey_login(rp, origin_of(req), field(body, "id"), field(body, "client"), field(body, "authenticator"),
+                                field(body, "signature"), token, why)) {
+        case auth::Login::Ok:
+            set_session_cookie(req, token);
+            return result(req, true, "Signed in");
+        case auth::Login::Locked:
+            return result(req, false, "Too many failed sign-ins. Try again in 30 seconds.", "429 Too Many Requests");
+        default:
+            return result(req, false, why ? why : "The passkey was not accepted", "401 Unauthorized");
+    }
+}
+
 esp_err_t auth_get(httpd_req_t* req) {
     const bool set = auth::password_set();
     const bool in = set && auth::valid(session_of(req));
+    std::string rp;
     std::string j = std::string("{\"password_set\":") + (set ? "true" : "false") + ",\"signed_in\":" + (in ? "true" : "false") +
-                    ",\"via_hotspot\":" + (from_hotspot(req) ? "true" : "false") + "}";
+                    ",\"via_hotspot\":" + (from_hotspot(req) ? "true" : "false") +
+                    ",\"https\":" + (secure(req) ? "true" : "false") + ",\"https_available\":" + (g_https ? "true" : "false") +
+                    ",\"passkey_ready\":" + (passkey_host(req, rp) ? "true" : "false") +
+                    ",\"passkeys\":" + std::to_string(auth::passkeys().size()) +
+                    ",\"hostname\":\"" + (g_hooks.hostname ? json_escape(g_hooks.hostname()) : std::string()) + "\"}";
     return send_json(req, j);
 }
 
@@ -461,16 +577,45 @@ esp_err_t start(const Hooks& hooks) {
     auth::load();
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = 8192;
-    cfg.max_uri_handlers = 24;
+    cfg.max_uri_handlers = 32;
     cfg.max_open_sockets = 7;
     cfg.recv_wait_timeout = 40;  // a confirmation on the deck can take up to 30 s
     cfg.send_wait_timeout = 40;
     cfg.lru_purge_enable = true;
+
+    // HTTPS on 443 with the dock's own certificate (its authority is at /ca.pem), for passkeys and a
+    // padlock; plain HTTP stays on 80 so the dock is reachable before the authority is trusted.
+    httpd_handle_t secure = nullptr;
+    tls_identity_t id{};
+    if (tls_identity_get(&id, false) == ESP_OK) {
+        if (id.ca_pem) g_ca_pem = id.ca_pem;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"  // IDF's macro, written for C
+        httpd_ssl_config_t ssl = HTTPD_SSL_CONFIG_DEFAULT();
+#pragma GCC diagnostic pop
+        ssl.httpd = cfg;
+        ssl.httpd.ctrl_port = cfg.ctrl_port + 1;
+        ssl.httpd.max_open_sockets = 5;
+        ssl.port_secure = 443;
+        ssl.servercert = reinterpret_cast<const unsigned char*>(id.cert_pem);
+        ssl.servercert_len = id.cert_len;
+        ssl.prvtkey_pem = reinterpret_cast<const unsigned char*>(id.key_pem);
+        ssl.prvtkey_len = id.key_len;
+        ssl.transport_mode = HTTPD_SSL_TRANSPORT_SECURE;
+        ssl.session_tickets = true;  // a full handshake costs ~300 ms; the page opens several connections
+        if (httpd_ssl_start(&secure, &ssl) == ESP_OK) g_https = true;
+        else ESP_LOGE(TAG, "HTTPS did not start");
+        tls_identity_free(&id);  // esp_https_server keeps its own copies
+    } else {
+        ESP_LOGE(TAG, "no TLS identity: HTTPS is off");
+    }
+
     httpd_handle_t server = nullptr;
     esp_err_t err = httpd_start(&server, &cfg);
     if (err != ESP_OK) return err;
     const httpd_uri_t uris[] = {
         {"/", HTTP_GET, index_get, nullptr},
+        {"/ca.pem", HTTP_GET, ca_get, nullptr},
         {"/api/auth", HTTP_GET, auth_get, nullptr},
         {"/api/setup", HTTP_POST, setup_post, nullptr},
         {"/api/login", HTTP_POST, login_post, nullptr},
@@ -492,9 +637,22 @@ esp_err_t start(const Hooks& hooks) {
         {"/api/wifi/enabled", HTTP_POST, wifi_enabled_post, nullptr},
         {"/api/wifi/forget", HTTP_POST, wifi_forget_post, nullptr},
         {"/api/hostname", HTTP_POST, hostname_post, nullptr},
+        {"/api/passkeys", HTTP_GET, passkeys_get, nullptr},
+        {"/api/passkey/register/options", HTTP_POST, passkey_register_options_post, nullptr},
+        {"/api/passkey/register", HTTP_POST, passkey_register_post, nullptr},
+        {"/api/passkey/delete", HTTP_POST, passkey_delete_post, nullptr},
+        {"/api/passkey/login/options", HTTP_POST, passkey_login_options_post, nullptr},
+        {"/api/passkey/login", HTTP_POST, passkey_login_post, nullptr},
     };
-    for (const auto& u : uris) httpd_register_uri_handler(server, &u);
-    ESP_LOGI(TAG, "web interface on port 80");
+    for (const auto& u : uris) {
+        httpd_register_uri_handler(server, &u);
+        if (secure) {
+            httpd_uri_t s = u;
+            s.user_ctx = const_cast<char*>(kSecure);  // the handler can tell it came over HTTPS
+            httpd_register_uri_handler(secure, &s);
+        }
+    }
+    ESP_LOGI(TAG, "web interface on port 80%s", g_https ? " and 443 (HTTPS)" : "");
     return ESP_OK;
 }
 

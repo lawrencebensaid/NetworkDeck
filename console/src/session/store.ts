@@ -4,13 +4,14 @@
  */
 import { reactive } from "vue";
 
-import { api, whenSignedOut, type Deck, type Status } from "./api.ts";
+import { api, whenSignedOut, type AuthState, type Deck, type Status } from "./api.ts";
 
 export type Phase = "checking" | "setup" | "signed-out" | "signed-in" | "unreachable";
 
 export const store = reactive({
   phase: "checking" as Phase,
   viaHotspot: false,
+  auth: null as AuthState | null,
   status: null as Status | null,
   deck: null as Deck | null,
   lastSeen: 0,
@@ -57,6 +58,7 @@ whenSignedOut(() => {
 export async function checkAuth() {
   try {
     const a = await api.auth();
+    store.auth = a;
     store.viaHotspot = a.via_hotspot;
     if (!a.password_set) store.phase = "setup";
     else if (!a.signed_in) store.phase = "signed-out";
@@ -81,6 +83,14 @@ export async function signOut() {
 export function signedIn() {
   store.phase = "signed-in";
   startPolling();
+}
+
+export async function refreshAuth() {
+  try {
+    store.auth = await api.auth();
+  } catch {
+    /* offline for a moment */
+  }
 }
 
 export function refreshStatus() {
