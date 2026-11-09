@@ -183,6 +183,8 @@ extern "C" void app_main(void) {
         ESP_LOGI(TAG, "host %s", connected ? "connected" : "disconnected");
         deck_ui::set_host(connected);
     };
+    config.on_host_output = deck_ui::host_output;
+    config.on_host_feature = deck_ui::host_feature;
     dock_server::start(config);
 
     usb_bridge::Callbacks cb;
@@ -196,6 +198,7 @@ extern "C" void app_main(void) {
         dock_server::deck_detached();
     };
     cb.on_input = [](const uint8_t* report, size_t len) {
+        deck_ui::observe_input(report, len);
         if (deck_ui::owns_deck()) {
             deck_ui::input(report, len);
         } else {
@@ -208,6 +211,7 @@ extern "C" void app_main(void) {
 
     web::Hooks hooks;
     hooks.status_json = status_json;
+    hooks.deck_json = deck_ui::deck_json;
     hooks.scan = [] {
         std::vector<web::Network> out;
         for (const auto& r : net::scan()) out.push_back({r.ssid, r.rssi, r.secure});
