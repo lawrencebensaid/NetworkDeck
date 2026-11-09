@@ -145,11 +145,13 @@ export function hardware(pid: number | undefined, cols?: number, rows?: number, 
 }
 
 /*
- * The finish of the deck that is plugged in. The USB ids are the same for a black and a white deck of
- * one model, and Elgato's HID reports carry no colour; the product string is the one place a white
- * edition could say so, so it is checked. Everything else is drawn in the model's own finish (black).
+ * The finish of the deck that is plugged in. A black and a white deck of one model have the same USB ids,
+ * and neither USB nor Elgato's HID reports carry a colour, so the dock remembers what was chosen for each
+ * deck (by serial, in the Stream Deck panel). Until then: a product string that says "white", or the
+ * model's own finish.
  */
-export function finishOf(h: Hardware, product?: string): Finish {
+export function finishOf(h: Hardware, chosen?: string, product?: string): Finish {
+  if (chosen === "white" || chosen === "black") return chosen
   if (product && /\bwhite\b/i.test(product)) return "white"
   return h.finish
 }

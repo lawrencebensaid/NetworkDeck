@@ -5,12 +5,16 @@
 
 #include <cctype>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 #include "deck_ui/deck.hpp"
 #include "dock_server.hpp"
 #include "esp_app_desc.h"
 #include "esp_log.h"
+#include "esp_netif_sntp.h"
+#include "eventlog.hpp"
+#include "nvs.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "matter.hpp"
@@ -45,7 +49,37 @@ std::string hex(const std::array<uint8_t, 6>& mac, size_t from) {
 deck_ui::Ip4 to_ui(const settings::Ip4& ip) { return {ip[0], ip[1], ip[2], ip[3]}; }
 settings::Ip4 from_ui(const deck_ui::Ip4& ip) { return {ip[0], ip[1], ip[2], ip[3]}; }
 
+using eventlog::Cat;
+using eventlog::Level;
+
+// The network as the log tells it, once per change.
+void log_network(const net::Status& s) {
+    static net::Link last_link = net::Link::None;
+    static std::string last_ip;
+    static bool first = true;
+    if (!first && s.link == last_link && s.ip == last_ip) return;
+    const bool had = !first && last_link != net::Link::None;
+    first = false;
+    last_link = s.link;
+    last_ip = s.ip;
+    switch (s.link) {
+        case net::Link::Ethernet:
+            if (!s.ip.empty()) eventlog::add(Cat::Network, Level::Info, "On Ethernet at %s", s.ip.c_str());
+            break;
+        case net::Link::Wifi:
+            eventlog::add(Cat::Network, Level::Info, "On Wi-Fi '%s' at %s", s.wifi_ssid.c_str(), s.ip.c_str());
+            break;
+        case net::Link::Hotspot:
+            eventlog::add(Cat::Network, Level::Warn, "Setup network '%s' open: no other network", s.hotspot_ssid.c_str());
+            break;
+        default:
+            if (had) eventlog::add(Cat::Network, Level::Warn, "Network lost");
+            break;
+    }
+}
+
 void publish_net(const net::Status& s) {
+    log_network(s);
     // A DHCP address is named in the HTTPS certificate from the next start (static ones always are).
     if (s.link == net::Link::Ethernet || s.link == net::Link::Wifi) tls_set_ip4(s.ip.c_str());
     {
@@ -126,6 +160,8 @@ void actions_task(void*) {
             }
             case deck_ui::UiEvent::Kind::FactoryReset:
                 if (ask("Factory reset?")) {
+                    eventlog::add(Cat::System, Level::Warn, "Factory reset from the deck");
+                    vTaskDelay(pdMS_TO_TICKS(200));  // the entry reaches the flash
                     settings::factory_reset();
                     vTaskDelay(pdMS_TO_TICKS(300));
                     matter::unpair();  // Matter's own storage goes too, and it leaves every controller
@@ -190,6 +226,7 @@ std::string status_json() {
     {
         const auto h = dock_server::host();
         j += ",\"host_ip\":\"" + h.ip + "\",\"host_seconds\":" + std::to_string(h.seconds);
+        j += ",\"host_name\":\"" + json_escape(h.name) + "\",\"host_model\":\"" + json_escape(h.model) + "\"";
     }
     j += ",\"deck\":\"" + std::string(deck_name) + "\"}";
     return j;
@@ -207,6 +244,69 @@ std::string matter_json() {
 }
 
 // Leaving every controller restarts the dock: give the web reply a moment to go out first.
+std::string g_last_host;  // "Lawrence's MacBook Pro (10.0.1.137)", for the disconnect entry
+
+// Who connected: the computer's own name over Bonjour, then logged.
+void describe_host_task(void*) {
+    const std::string ip = dock_server::host().ip;
+    const net::Peer p = ip.empty() ? net::Peer{} : net::describe(ip);
+    dock_server::set_host_info(ip, p.name, p.model, p.hostname);
+    g_last_host = p.name.empty() ? ip : p.name + " (" + ip + ")";
+    eventlog::add(Cat::Connection, Level::Info, "Stream Deck app connected from %s", g_last_host.c_str());
+    vTaskDelete(nullptr);
+}
+
+const char* reset_reason() {
+    switch (esp_reset_reason()) {
+        case ESP_RST_POWERON: return "power on";
+        case ESP_RST_SW: return "a restart";
+        case ESP_RST_PANIC: return "a crash";
+        case ESP_RST_INT_WDT:
+        case ESP_RST_TASK_WDT:
+        case ESP_RST_WDT: return "a watchdog reset (it hung)";
+        case ESP_RST_BROWNOUT: return "a brownout (the power dipped)";
+        case ESP_RST_EXT: return "the reset button";
+        case ESP_RST_USB: return "a USB reset";
+        default: return "an unknown reset";
+    }
+}
+
+// The start in the log: why, and whether the firmware changed since the last start.
+void log_start() {
+    const char* version = esp_app_get_description()->version;
+    const esp_reset_reason_t why = esp_reset_reason();
+    const Level level = why == ESP_RST_PANIC || why == ESP_RST_INT_WDT || why == ESP_RST_TASK_WDT || why == ESP_RST_WDT ||
+                                why == ESP_RST_BROWNOUT
+                            ? Level::Error
+                            : Level::Info;
+    eventlog::add(Cat::System, level, "Started after %s (firmware %s)", reset_reason(), version);
+    nvs_handle_t h;
+    if (nvs_open("deck32", NVS_READWRITE, &h) != ESP_OK) return;
+    char was[32] = "";
+    size_t len = sizeof(was);
+    const bool known = nvs_get_str(h, "fwver", was, &len) == ESP_OK;
+    if (known && std::strcmp(was, version) != 0) {
+        const esp_partition_t* bad = esp_ota_get_last_invalid_partition();
+        esp_app_desc_t bad_desc{};
+        if (bad && esp_ota_get_partition_description(bad, &bad_desc) == ESP_OK && std::strcmp(bad_desc.version, was) != 0 &&
+            std::strcmp(bad_desc.version, version) != 0)
+            eventlog::add(Cat::Update, Level::Error, "Firmware %s did not start: back on %s", bad_desc.version, version);
+        else
+            eventlog::add(Cat::Update, Level::Info, "Updated to %s from %s", version, was);
+    }
+    if (!known || std::strcmp(was, version) != 0) {
+        nvs_set_str(h, "fwver", version);
+        nvs_commit(h);
+    }
+    nvs_close(h);
+}
+
+void on_time_sync(struct timeval*) {
+    static bool once = false;
+    if (!once) eventlog::add(Cat::System, Level::Info, "Clock set from the network");
+    once = true;
+}
+
 void matter_off_task(void*) {
     vTaskDelay(pdMS_TO_TICKS(500));
     matter::unpair();
@@ -232,6 +332,8 @@ extern "C" void app_main(void) {
     }
     ESP_ERROR_CHECK(err);
     settings::load();
+    eventlog::start();
+    log_start();
 
     const auto mac = net::mac();
     cora::DockIdentity identity;
@@ -254,6 +356,11 @@ extern "C" void app_main(void) {
     deck_ui::set_brightness(settings::deck_brightness());
 
     ESP_ERROR_CHECK(net::start(g_name, publish_net));
+    {
+        esp_sntp_config_t sntp = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+        sntp.sync_cb = on_time_sync;
+        esp_netif_sntp_init(&sntp);
+    }
     net::set_hostname(hostname());
     publish_net(net::status());
 
@@ -262,6 +369,13 @@ extern "C" void app_main(void) {
     config.on_host_change = [](bool connected) {
         ESP_LOGI(TAG, "host %s", connected ? "connected" : "disconnected");
         deck_ui::set_host(connected);
+        if (connected) {
+            xTaskCreatePinnedToCore(describe_host_task, "host_name", 6144, nullptr, 3, nullptr, 0);
+        } else {
+            eventlog::add(Cat::Connection, Level::Info, "Stream Deck app disconnected%s%s", g_last_host.empty() ? "" : ": ",
+                          g_last_host.c_str());
+            g_last_host.clear();
+        }
     };
     config.on_host_output = deck_ui::host_output;
     config.on_host_feature = deck_ui::host_feature;
@@ -269,12 +383,15 @@ extern "C" void app_main(void) {
 
     usb_bridge::Callbacks cb;
     cb.on_attach = [](const usb_bridge::DeckInfo& info) {
+        eventlog::add(Cat::Deck, Level::Info, "%s plugged in (serial %s)", info.product.empty() ? "Stream Deck" : info.product.c_str(),
+                      info.serial.c_str());
         dock_server::deck_attached(info);
         deck_ui::deck_attached(info.pid);
         if (const auto* m = deck_ui::find_model(info.pid)) matter::remember_keys(static_cast<unsigned>(m->keys()));
     };
     cb.on_detach = [] {
         ESP_LOGI(TAG, "deck unplugged");
+        eventlog::add(Cat::Deck, Level::Info, "Stream Deck unplugged");
         deck_ui::deck_detached();
         dock_server::deck_detached();
     };
@@ -299,7 +416,20 @@ extern "C" void app_main(void) {
     web::Hooks hooks;
     hooks.status_json = status_json;
     hooks.hostname = [] { return net::hostname(); };
-    hooks.deck_json = deck_ui::deck_json;
+    hooks.deck_json = [] {
+        // The finish chosen for this deck, by serial (USB doesn't say a deck's colour).
+        std::string j = deck_ui::deck_json();
+        if (usb_bridge::attached() && j.size() > 1 && j.back() == '}') {
+            const std::string f = settings::deck_finish(usb_bridge::info().serial);
+            j.insert(j.size() - 1, ",\"finish\":\"" + f + "\"");
+        }
+        return j;
+    };
+    hooks.set_deck_finish = [](const std::string& f) {
+        if (!usb_bridge::attached()) return false;
+        settings::set_deck_finish(usb_bridge::info().serial, f);
+        return true;
+    };
     hooks.scan = [] {
         std::vector<web::Network> out;
         for (const auto& r : net::scan()) out.push_back({r.ssid, r.rssi, r.secure});

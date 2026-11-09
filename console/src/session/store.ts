@@ -33,6 +33,11 @@ async function pollStatus() {
   }
 }
 
+/* Ask for the deck now (the live view does when it is waiting for the rest of a page of keys). */
+export function refreshDeck() {
+  void pollDeck();
+}
+
 async function pollDeck() {
   try {
     store.deck = await api.deck();

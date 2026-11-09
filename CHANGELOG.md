@@ -6,7 +6,18 @@ adds a line under "Unreleased"; the release that raises `VERSION` renames that s
 
 ## Unreleased
 
+## [0.2.0] - 2026-11-09
+
 ### Added
+- Logs: what the dock did (starts and why, crashes, updates, sign-ins, API keys, network changes, the
+  Stream Deck app connecting, decks plugged in, Matter), kept in the dock's flash through restarts and
+  power loss, 8160 entries. With filters, search and download; the protocol trace is in there too.
+- The REST API, with API keys (Settings → API keys) sent as `Authorization: Bearer`; documented in
+  `docs/api.md`. A key can also be made by confirming on the deck, without signing in.
+- The web interface names the computer the Stream Deck app connected from ("Lawrence's MacBook Pro ·
+  MacBook Pro"), as it announces itself on the network.
+- Each Stream Deck's finish (black or white) is remembered by the dock, set once in the Stream Deck panel.
+- The dock keeps its clock from the network (log times).
 - A new web interface: the Stream Deck on the dock is shown live in the middle, with what the
   Stream Deck app (or the dock) has on its keys and which key is pressed. Lights in the top bar show
   the deck and the network; the settings and the integrations open as windows.
@@ -20,13 +31,14 @@ adds a line under "Unreleased"; the release that raises `VERSION` renames that s
   proportions, the Stream Deck logo, the key caps, and the + and + XL's touch strip and dials.
 - Setup on the deck now asks Ethernet or Wi-Fi. Wi-Fi shows a QR code to join the dock's setup network,
   also while the cable is in, and can turn Wi-Fi back on.
-- The web interface shows which computer's Stream Deck app is connected, and since when.
 - Settings → Appearance: light, dark or follow the system.
 - Firmware updates: drop the `.bin` from a GitHub release on the page; its version shows before it is sent.
 - Matter: add the dock to Home Assistant, Apple Home or Google Home with the QR code in the web
   interface (Integrations). It is off until you choose Set up Matter. Each key is a button there (press, release, long press) for automations.
 
 ### Fixed
+- The dock restarted under heavy Stream Deck app traffic over Wi-Fi (the Wi-Fi link ran out of memory).
+- A new page of keys appears in the web interface all at once, instead of key by key.
 - Without an Ethernet cable the dock joins the saved Wi-Fi network (it could give up after one try),
   and opens its setup network when there is none.
 - Turning off Matter works again (the web interface could stop answering).

@@ -68,7 +68,8 @@ export function useLights() {
       return { ...base, icon: Unplug, tone: "off", state: "Not plugged in", tip: "Plug a Stream Deck into the dock's USB-A port." }
     const model = d.model ?? hardware(d.pid).name
     if (store.status?.host) {
-      const from = store.status.host_ip ? ` on ${store.status.host_ip}` : ""
+      const who = store.status.host_name || store.status.host_ip
+      const from = who ? ` on ${who}` : ""
       return { ...base, tone: "on", state: "Stream Deck app", tip: `${model}: the Stream Deck app${from} draws the keys.` }
     }
     return { ...base, tone: "busy", state: "Dock screens", tip: `${model}: no Stream Deck app is connected, so it shows the dock's own screens.` }

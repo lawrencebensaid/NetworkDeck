@@ -65,3 +65,7 @@ CONFIG_ESP_TLS_SERVER_SESSION_TICKETS=y
 
 # The Wi-Fi and IP event handlers log and call into esp-hosted: more than the default 2304 bytes.
 CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096
+
+# The Wi-Fi link's receive buffers grow with the traffic; in internal RAM (shared with Matter, TLS
+# and the web server) the allocation failed under load and the driver asserted. The P4's DMA reaches PSRAM.
+CONFIG_ESP_HOSTED_MEMPOOL_PREFER_SPIRAM=y

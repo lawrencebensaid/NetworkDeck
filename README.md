@@ -48,7 +48,12 @@ offset 0 over the board's Type-C port:
 python -m esptool --chip esp32p4 -p /dev/cu.usbmodem<…> -b 460800 write-flash 0x0 networkdeck-<version>-full.bin
 ```
 
-Later updates: upload `networkdeck-<version>.bin` in the web interface.
+Later updates: drop `networkdeck-<version>.bin` on Settings → Firmware in the web interface.
+
+## API
+
+Everything the web interface does is a small REST API, for scripts and other tools: make an API key in
+Settings → API keys and send it as `Authorization: Bearer …`. The endpoints are in [docs/api.md](docs/api.md).
 
 ## Build
 

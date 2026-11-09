@@ -7,14 +7,17 @@
  * Each key is an <img> addressed by its version (/api/key?n=3&v=1207): a key reloads only when what is
  * on it changed, and an unchanged key is never fetched again. Keys arrive in the deck's own orientation
  * and the model's transform turns them upright. A pressed key sinks at once, the way the real one does.
+ *
+ * A new page of keys appears all at once, as on the deck: while the Stream Deck app is still writing
+ * keys (quiet_ms) the view waits, then loads every changed image and shows them in the same frame.
  */
 import { useElementSize } from "@vueuse/core"
 import { Usb } from "@lucide/vue"
-import { computed, ref } from "vue"
+import { computed, ref, watch } from "vue"
 
 import logo from "../assets/stream-deck-logo.png"
 import { finishOf, hardware } from "../session/models.ts"
-import { store } from "../session/store.ts"
+import { refreshDeck, store } from "../session/store.ts"
 
 const LOGO_RATIO = 560 / 110 /* the logo image, width over height */
 
@@ -23,7 +26,57 @@ const { width, height } = useElementSize(stage)
 
 const deck = computed(() => store.deck)
 const hw = computed(() => hardware(deck.value?.pid, deck.value?.cols, deck.value?.rows, deck.value?.model))
-const finish = computed(() => finishOf(hw.value, deck.value?.product))
+const finish = computed(() => finishOf(hw.value, deck.value?.finish, deck.value?.product))
+
+/* What the keys show now: committed a page at a time. */
+interface Face {
+  src: string | null
+  color: string | null
+}
+const faces = ref<Face[]>([])
+const QUIET_MS = 60 /* the app writes a page of keys within a few tens of ms */
+const MAX_WAIT_MS = 700 /* a deck that never goes quiet (an animation) still updates */
+let waitingSince = 0
+let generation = 0
+
+function wanted(): Face[] {
+  const d = deck.value
+  const n = hw.value.cols * hw.value.rows
+  return Array.from({ length: n }, (_, i) => {
+    const k = d?.live ? d.keys?.[i] : undefined
+    return { src: k?.v && !k.color ? `/api/key?n=${i}&v=${k.v}` : null, color: k?.color ?? null }
+  })
+}
+
+function preload(src: string) {
+  const img = new Image()
+  img.src = src
+  return img.decode().catch(() => undefined)
+}
+
+watch(
+  () => deck.value,
+  async () => {
+    const next = wanted()
+    const now = faces.value
+    const changed = next.some((f, i) => f.src !== now[i]?.src || f.color !== now[i]?.color) || next.length !== now.length
+    if (!changed) {
+      waitingSince = 0
+      return
+    }
+    const quiet = deck.value?.quiet_ms ?? 1e6
+    if (quiet < QUIET_MS && (waitingSince === 0 || performance.now() - waitingSince < MAX_WAIT_MS)) {
+      if (waitingSince === 0) waitingSince = performance.now()
+      setTimeout(refreshDeck, 120) /* look again soon rather than at the next poll */
+      return
+    }
+    waitingSince = 0
+    const mine = ++generation
+    await Promise.all(next.filter((f, i) => f.src && f.src !== now[i]?.src).map((f) => preload(f.src!)))
+    if (mine === generation) faces.value = next
+  },
+  { immediate: true },
+)
 
 /* Pixels per millimetre: the body as large as fits, with room for the caption, at most 4.6 (an MK.2 ~540 px wide). */
 const scale = computed(() => {
@@ -46,12 +99,12 @@ const keys = computed(() => {
   const gw = h.cols * h.key + Math.max(0, h.cols - 1) * h.gap
   const left = (h.w - gw) / 2
   return Array.from({ length: h.cols * h.rows }, (_, i) => {
-    const k = d?.live ? d.keys?.[i] : undefined
+    const f = faces.value[i]
     return {
       i,
       style: box(left + (i % h.cols) * (h.key + h.gap), h.top + Math.floor(i / h.cols) * (h.key + h.gap), h.key, h.key, h.key * 0.17),
-      src: k?.v && !k.color ? `/api/key?n=${i}&v=${k.v}` : null,
-      color: k?.color ?? null,
+      src: f?.src ?? null,
+      color: f?.color ?? null,
       pressed: d?.pressed?.[i] === 1,
     }
   })
@@ -69,8 +122,9 @@ const caption = computed(() => {
   if (!d?.attached) return ""
   if (d.live === false) return "The dock passes it through to the Stream Deck app. Its keys aren't shown here yet."
   if (d.source !== "app") return "Showing the dock's own screens"
-  const ip = store.status?.host_ip
-  return ip ? `Showing what the Stream Deck app on ${ip} draws` : "Showing what the Stream Deck app draws"
+  const s = store.status
+  const who = s?.host_name || s?.host_ip
+  return who ? `Showing what the Stream Deck app on ${who} draws` : "Showing what the Stream Deck app draws"
 })
 </script>
 
@@ -96,7 +150,7 @@ const caption = computed(() => {
 
         <div v-for="k in keys" :key="k.i" class="key" :data-pressed="k.pressed" :style="k.style">
           <div class="lcd" :style="k.color ? { background: k.color } : undefined">
-            <img v-if="k.src" :src="k.src" :style="{ transform: deck.transform }" alt="" draggable="false" decoding="async" />
+            <img v-if="k.src" :src="k.src" :style="{ transform: deck.transform }" alt="" draggable="false" decoding="sync" />
           </div>
         </div>
       </div>

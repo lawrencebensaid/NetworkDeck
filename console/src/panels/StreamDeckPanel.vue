@@ -10,7 +10,8 @@ import { toast } from "vue-sonner"
 
 import { Label } from "@/components/ui/label"
 import { api } from "../session/api.ts"
-import { hardware } from "../session/models.ts"
+import { cn } from "@/lib/utils"
+import { finishOf, hardware, type Finish } from "../session/models.ts"
 import { store } from "../session/store.ts"
 
 const d = computed(() => store.deck)
@@ -24,11 +25,43 @@ function duration(s: number) {
   const h = Math.floor(m / 60)
   return h < 24 ? `for ${h} h ${m % 60} min` : `for ${Math.floor(h / 24)} days`
 }
+/* A Mac's model code, in words: "MacBookPro18,1" and "Mac16,10" both say what kind of Mac it is. */
+const MAC_MODELS: [RegExp, string][] = [
+  [/^MacBookPro/, "MacBook Pro"],
+  [/^MacBookAir/, "MacBook Air"],
+  [/^MacBook\d/, "MacBook"],
+  [/^Macmini/, "Mac mini"],
+  [/^iMac/, "iMac"],
+  [/^MacPro/, "Mac Pro"],
+  [/^Mac13,[12]$|^Mac14,1[34]$|^Mac15,14$|^Mac16,9$/, "Mac Studio"],
+  [/^Mac14,(3|12)$|^Mac16,1[01]$/, "Mac mini"],
+  [/^Mac14,(2|15)$|^Mac15,1[23]$|^Mac16,1[23]$/, "MacBook Air"],
+  [/^Mac14,(5|6|7|9|10)$|^Mac15,([3679]|1[01])$|^Mac16,[15-8]$/, "MacBook Pro"],
+  [/^Mac15,[45]$|^Mac16,[23]$/, "iMac"],
+  [/^Mac14,8$/, "Mac Pro"],
+]
+function kindOf(model?: string) {
+  if (!model) return ""
+  return MAC_MODELS.find(([re]) => re.test(model))?.[1] ?? model
+}
+
 const app = computed(() => {
   const s = store.status
   if (!s?.host || !s.host_ip) return null
-  return { ip: s.host_ip, since: duration(s.host_seconds ?? 0) }
+  const kind = kindOf(s.host_model)
+  return { name: s.host_name || "", kind: kind && kind !== s.host_name ? kind : "", ip: s.host_ip, since: duration(s.host_seconds ?? 0) }
 })
+
+const finish = computed(() => finishOf(hw.value, d.value?.finish, d.value?.product))
+async function setFinish(f: Finish) {
+  const r = await api.finish(f)
+  if (!r.ok) toast.error(r.message)
+}
+const choice = (on: boolean) =>
+  cn(
+    "flex flex-1 items-center justify-center gap-2 rounded-md border px-3 py-1.5 text-sm transition-colors outline-none focus-visible:ring-3 focus-visible:ring-ring/50",
+    on ? "border-primary bg-primary/5 font-medium" : "text-muted-foreground hover:bg-muted/60 hover:text-foreground",
+  )
 
 /* The slider follows the dock until it is moved; a move is sent when it is let go. */
 const brightness = ref(70)
@@ -75,12 +108,27 @@ async function commit() {
       </template>
       <dt class="text-muted-foreground">Stream Deck app</dt>
       <dd data-testid="deck-host">
-        <template v-if="app">Connected from <span class="font-mono text-xs select-all">{{ app.ip }}</span>, {{ app.since }}</template>
+        <template v-if="app">
+          <span v-if="app.name" class="font-medium">{{ app.name }}</span>
+          <span v-if="app.kind" class="text-muted-foreground"> · {{ app.kind }}</span>
+          <div class="text-xs text-muted-foreground"><span class="font-mono select-all">{{ app.ip }}</span>, connected {{ app.since }}</div>
+        </template>
         <template v-else>Not connected</template>
       </dd>
       <dt class="text-muted-foreground">Showing</dt>
       <dd>{{ d.live === false ? "Nothing here: this model has no live view yet" : d.source === "app" ? "The Stream Deck app's profile" : "The dock's own screens" }}</dd>
     </dl>
+
+    <div class="flex flex-col gap-2 border-t pt-5">
+      <span class="text-sm font-medium" id="finish-label">Finish</span>
+      <div class="flex gap-2" role="radiogroup" aria-labelledby="finish-label">
+        <button v-for="f in (['black', 'white'] as const)" :key="f" type="button" role="radio" :aria-checked="finish === f" :data-finish="f" :class="choice(finish === f)" @click="setFinish(f)">
+          <span :class="cn('size-3.5 rounded-full ring-1 ring-black/20', f === 'white' ? 'bg-zinc-100' : 'bg-zinc-800')" aria-hidden="true" />
+          {{ f === "black" ? "Black" : "White" }}
+        </button>
+      </div>
+      <p class="text-xs text-muted-foreground">USB doesn't say a deck's colour, so the dock remembers it for this deck.</p>
+    </div>
 
     <div v-if="d.live !== false" class="flex flex-col gap-2 border-t pt-5">
       <div class="flex items-baseline justify-between">

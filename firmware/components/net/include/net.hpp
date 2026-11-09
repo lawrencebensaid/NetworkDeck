@@ -58,6 +58,14 @@ esp_err_t start_mdns(const std::string& name, const std::string& serial, uint16_
 void set_hostname(const std::string& host);
 std::string hostname();
 
+// A computer on the network, as it announces itself over Bonjour: its name ("Lawrence's MacBook Pro"),
+// its model code (MacBookPro18,1) when announced, and its hostname. Empty fields when nothing answers.
+// Blocks for a few seconds: call it off the network task.
+struct Peer {
+    std::string name, model, hostname;
+};
+Peer describe(const std::string& ip);
+
 // Signal of the joined Wi-Fi network in dBm, 0 when not on Wi-Fi.
 int wifi_rssi();
 

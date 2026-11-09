@@ -20,6 +20,7 @@
 #include "freertos/task.h"
 #include "lwip/ip4_addr.h"
 #include "mdns.h"
+#include "eventlog.hpp"
 
 namespace net {
 namespace {
@@ -225,9 +226,20 @@ void on_wifi_event(void*, esp_event_base_t, int32_t id, void* data) {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (id == WIFI_EVENT_STA_DISCONNECTED) {
         const auto* d = static_cast<const wifi_event_sta_disconnected_t*>(data);
-        if (g_sta_wanted)
-            ESP_LOGW(TAG, "Wi-Fi '%s': not joined (reason %u, signal %d dBm)", g_wifi_cfg.ssid.c_str(), d ? d->reason : 0,
-                     d ? d->rssi : 0);
+        if (g_sta_wanted) {
+            const unsigned reason = d ? d->reason : 0;
+            ESP_LOGW(TAG, "Wi-Fi '%s': not joined (reason %u, signal %d dBm)", g_wifi_cfg.ssid.c_str(), reason, d ? d->rssi : 0);
+            static unsigned last_reason = 0;
+            if (reason != last_reason || g_sta_connected) {  // once per kind of failure, not every retry
+                last_reason = reason;
+                const char* why = reason == 201 ? "the network was not found"
+                                  : (reason == 15 || reason == 2 || reason == 204 || reason == 202) ? "the password may be wrong"
+                                  : reason == 8 ? "it left the network"
+                                  : "the access point did not accept it";
+                eventlog::add(eventlog::Cat::Network, eventlog::Level::Warn, "Wi-Fi '%s' not joined: %s (reason %u)",
+                              g_wifi_cfg.ssid.c_str(), why, reason);
+            }
+        }
 
         g_sta_connected = false;
         g_connecting = false;
@@ -523,6 +535,56 @@ void set_hostname(const std::string& host) {
 std::string hostname() {
     std::lock_guard<std::mutex> lock(g_mutex);
     return g_hostname;
+}
+
+namespace {
+bool has_ip(const mdns_result_t* r, uint32_t ip) {
+    for (const mdns_ip_addr_t* a = r->addr; a; a = a->next)
+        if (a->addr.type == ESP_IPADDR_TYPE_V4 && a->addr.u_addr.ip4.addr == ip) return true;
+    return false;
+}
+
+// Services computers announce, best first: AirPlay names the computer and its model.
+bool find_peer(const char* service, uint32_t ip, Peer& p) {
+    mdns_result_t* results = nullptr;
+    if (mdns_query_ptr(service, "_tcp", 1500, 24, &results) != ESP_OK || !results) return false;
+    bool found = false;
+    for (mdns_result_t* r = results; r && !found; r = r->next) {
+        bool match = has_ip(r, ip);
+        if (!match && r->hostname) {  // no address in the answer: ask for the host's
+            esp_ip4_addr_t a{};
+            match = mdns_query_a(r->hostname, 700, &a) == ESP_OK && a.addr == ip;
+        }
+        if (!match) continue;
+        found = true;
+        if (r->instance_name) {
+            p.name = r->instance_name;
+            const size_t at = p.name.find('@');  // "028CC23638C5@Lawrence's MacBook Pro" (_raop)
+            if (at != std::string::npos) p.name.erase(0, at + 1);
+        }
+        if (r->hostname) p.hostname = r->hostname;
+        for (size_t i = 0; i < r->txt_count; ++i)
+            if (r->txt[i].key && r->txt[i].value && (std::strcmp(r->txt[i].key, "model") == 0 || std::strcmp(r->txt[i].key, "am") == 0))
+                p.model = r->txt[i].value;
+    }
+    mdns_query_results_free(results);
+    return found;
+}
+}  // namespace
+
+Peer describe(const std::string& ip) {
+    Peer p;
+    esp_ip4_addr_t a{};
+    if (esp_netif_str_to_ip4(ip.c_str(), &a) != ESP_OK) return p;
+    for (const char* service : {"_airplay", "_companion-link", "_ssh", "_rfb", "_smb", "_device-info"}) {
+        Peer q;
+        if (!find_peer(service, a.addr, q)) continue;
+        if (p.name.empty()) p.name = q.name;
+        if (p.model.empty()) p.model = q.model;
+        if (p.hostname.empty()) p.hostname = q.hostname;
+        if (!p.name.empty() && !p.model.empty()) break;
+    }
+    return p;
 }
 
 int wifi_rssi() {

@@ -1,12 +1,11 @@
 <script setup lang="ts">
 /*
  * The rail: a slim column of icon buttons down the left, from under the top bar to the bottom. At the
- * top the panels beside the deck: the Stream Deck itself, Matter, and the protocol diagnostics. At the
- * bottom the dialogs: the settings, the integrations (Matter now; a REST API and MCP later) and the
- * account.
+ * top the panels beside the deck: the Stream Deck itself and Matter, then the log. At the bottom the
+ * dialogs: the settings, the integrations (Matter, the REST API; MCP later) and the account.
  * On a phone it runs along the bottom.
  */
-import { Activity, CircleUser, House, KeyRound, LogOut, Plug, Settings } from "@lucide/vue"
+import { CircleUser, House, KeyRound, LogOut, Plug, ScrollText, Settings } from "@lucide/vue"
 
 import {
   DropdownMenu,
@@ -23,10 +22,10 @@ import RailButton from "./RailButton.vue"
 import TipWrap from "./TipWrap.vue"
 
 defineProps<{ panel: PanelId | null }>()
-defineEmits<{ panel: [id: PanelId]; settings: [section?: string]; integrations: [] }>()
+defineEmits<{ panel: [id: PanelId]; settings: [section?: string]; integrations: []; logs: [] }>()
 
-const icons = { deck: DeckIcon, matter: House, diagnostics: Activity }
-const order: PanelId[] = ["deck", "matter", "diagnostics"]
+const icons = { deck: DeckIcon, matter: House }
+const order: PanelId[] = ["deck", "matter"]
 </script>
 
 <template>
@@ -44,6 +43,12 @@ const order: PanelId[] = ["deck", "matter", "diagnostics"]
         @click="$emit('panel', id)"
       >
         <component :is="icons[id]" />
+      </RailButton>
+    </TipWrap>
+
+    <TipWrap tip="Logs" side="right">
+      <RailButton aria-label="Logs" data-testid="logs-button" @mousedown.prevent @click="$emit('logs')">
+        <ScrollText />
       </RailButton>
     </TipWrap>
 

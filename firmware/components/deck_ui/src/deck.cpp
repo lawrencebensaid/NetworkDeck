@@ -34,7 +34,8 @@ Callbacks g_cb;
 std::mutex g_mutex;  // guards everything below
 std::unique_ptr<Ui> g_ui;
 const Model* g_model = nullptr;
-uint16_t g_pid = 0;  // the attached Elgato device, also one without dock screens
+uint16_t g_pid = 0;
+int64_t g_last_key_write = 0;  // when the host last changed a key (esp_timer), for deck_json's "quiet_ms"  // the attached Elgato device, also one without dock screens
 NetInfo g_net;
 Hotspot g_hotspot;
 bool g_host = false;
@@ -352,6 +353,7 @@ void host_output(const uint8_t* report, size_t len) {
     k.building.clear();
     k.has_color = false;
     k.version = ++g_version_seq;
+    g_last_key_write = esp_timer_get_time();
 }
 
 void host_feature(const uint8_t* report, size_t len) {
@@ -365,6 +367,7 @@ void host_feature(const uint8_t* report, size_t len) {
     k.has_color = true;
     k.color = c;
     k.version = ++g_version_seq;
+    g_last_key_write = esp_timer_get_time();
 }
 
 void observe_input(const uint8_t* report, size_t len) {
@@ -418,6 +421,11 @@ std::string deck_json() {
     }
     if (!g_model) return j + "}";
     const bool dock = owns_locked();
+    {
+        // How long the keys have been still: the page shows a new page of keys once it has all of it.
+        const int64_t quiet = g_last_key_write ? (esp_timer_get_time() - g_last_key_write) / 1000 : 1000000;
+        j += ",\"quiet_ms\":" + std::to_string(quiet > 1000000 ? 1000000 : quiet);
+    }
     j += ",\"keys\":[";
     for (int k = 0; k < g_model->keys(); ++k) {
         char b[64];

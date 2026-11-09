@@ -1,11 +1,11 @@
 <script setup lang="ts">
 /*
  * The integrations: how other systems use the dock. Matter (Home Assistant, Apple Home, Google Home)
- * now; a REST API and an MCP server are planned and listed as such. The list is at
- * the left with each one's state, the chosen one at the right.
+ * and the REST API (with API keys, made in Settings); an MCP server is planned and listed as such. The
+ * list is at the left with each one's state, the chosen one at the right.
  */
 import { computed, onBeforeUnmount, ref, watch, type Component } from "vue"
-import { Bot, House, Webhook, X } from "@lucide/vue"
+import { Cable, House, Webhook, X } from "@lucide/vue"
 
 import { Badge } from "@/components/ui/badge"
 import { Button } from "@/components/ui/button"
@@ -15,18 +15,22 @@ import MatterPanel from "../panels/MatterPanel.vue"
 import { api, type Matter } from "../session/api.ts"
 
 const open = defineModel<boolean>("open", { required: true })
+const emit = defineEmits<{ settings: [section: string] }>()
 const chosen = ref<"matter" | "rest" | "mcp">("matter")
 
-/* Matter's state for the list, while the dialog is open (the panel polls its own). */
+/* Matter's state and the API keys for the list, while the dialog is open (the panel polls its own). */
 const matter = ref<Matter | null>(null)
+const keys = ref<number | null>(null)
 let timer = 0
 async function load() {
   try {
     matter.value = await api.matter()
+    keys.value = (await api.keys()).length
   } catch {
     /* signed out or offline */
   }
 }
+const base = location.origin
 watch(
   open,
   (now) => {
@@ -54,16 +58,12 @@ const integrations = computed<Integration[]>(() => {
   const matterState = !m ? "…" : !m.running ? (m.enabled ? "Did not start" : "Off") : n > 0 ? (n === 1 ? "1 controller" : `${n} controllers`) : m.window_open ? "Ready to pair" : "Not paired"
   return [
     { id: "matter", name: "Matter", icon: House, state: matterState },
-    { id: "rest", name: "REST API", icon: Webhook, state: "Planned", later: true },
-    { id: "mcp", name: "MCP", icon: Bot, state: "Planned", later: true },
+    { id: "rest", name: "REST API", icon: Webhook, state: keys.value === null ? "…" : keys.value === 0 ? "No API keys" : keys.value === 1 ? "1 API key" : `${keys.value} API keys` },
+    { id: "mcp", name: "MCP", icon: Cable, state: "Planned", later: true },
   ]
 })
 
 const LATER = {
-  rest: {
-    title: "REST API",
-    text: "Read the deck and its keys, draw on them and change the dock's settings from scripts and other tools, with API keys in place of the password.",
-  },
   mcp: {
     title: "MCP",
     text: "Use the deck from any Model Context Protocol client: see what is on the keys, put things on them and hear about presses.",
@@ -80,7 +80,7 @@ const LATER = {
     >
       <header class="flex h-12 shrink-0 items-center justify-between gap-3 border-b bg-card px-4">
         <DialogTitle class="text-sm font-semibold">Integrations</DialogTitle>
-        <DialogDescription class="sr-only">How other systems use the dock: Matter, and later a REST API and MCP.</DialogDescription>
+        <DialogDescription class="sr-only">How other systems use the dock: Matter, the REST API, and later MCP.</DialogDescription>
         <DialogClose as-child>
           <Button type="button" variant="ghost" size="icon-sm" aria-label="Close integrations"><X /></Button>
         </DialogClose>
@@ -118,6 +118,19 @@ const LATER = {
               <h2 class="text-base font-semibold tracking-tight">Matter</h2>
               <p class="mt-0.5 mb-5 text-sm text-muted-foreground">Home Assistant, Apple Home and Google Home: every key is a button there, for automations.</p>
               <MatterPanel />
+            </template>
+            <template v-else-if="chosen === 'rest'">
+              <h2 class="text-base font-semibold tracking-tight">REST API</h2>
+              <p class="mt-0.5 mb-5 text-sm text-muted-foreground">
+                What this page does, from scripts and other tools: the dock's status, the deck and its keys, the log and the settings.
+                Every change is still confirmed on the deck.
+              </p>
+              <div class="flex flex-col gap-3 text-sm">
+                <p>Send an API key with each request:</p>
+                <pre class="overflow-x-auto rounded-md border bg-muted/40 p-3 font-mono text-xs leading-relaxed">curl -H "Authorization: Bearer ndk_…" {{ base }}/api/status</pre>
+                <p class="text-muted-foreground">The endpoints are listed in <code>docs/api.md</code> in the NetworkDeck repository.</p>
+                <div><Button variant="outline" size="sm" data-testid="manage-keys" @click="emit('settings', 'api'); open = false">Manage API keys</Button></div>
+              </div>
             </template>
             <template v-else>
               <div class="flex items-center gap-2">

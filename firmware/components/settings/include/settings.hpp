@@ -32,6 +32,11 @@ Wifi wifi();
 void set_wifi(const Wifi& w);
 
 // Brightness of the dock's own screens on the deck, 0..100 (the Stream Deck app sets its own).
+// How the web interface draws a deck: "black", "white", or empty when not chosen. Per deck serial
+// (USB doesn't tell a deck's colour), at most 8 decks remembered.
+std::string deck_finish(const std::string& serial);
+void set_deck_finish(const std::string& serial, const std::string& finish);
+
 int deck_brightness();
 void set_deck_brightness(int percent);
 
