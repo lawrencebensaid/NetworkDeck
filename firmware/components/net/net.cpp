@@ -359,6 +359,9 @@ void join(const settings::Wifi& w) {
 }
 
 std::vector<ScanResult> scan() {
+    // One scan at a time: a second caller waits and then scans again (two pages open, say).
+    static std::mutex one_at_a_time;
+    std::lock_guard<std::mutex> serial(one_at_a_time);
     std::vector<ScanResult> out;
     {
         std::lock_guard<std::mutex> lock(g_mutex);

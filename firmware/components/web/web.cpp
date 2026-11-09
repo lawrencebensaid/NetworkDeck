@@ -205,8 +205,7 @@ esp_err_t deck_get(httpd_req_t* req) {
     return send_json(req, g_hooks.deck_json ? g_hooks.deck_json() : "{}");
 }
 
-esp_err_t scan_get(httpd_req_t* req) {
-    if (!allowed(req, false)) return ESP_OK;
+esp_err_t scan_work(httpd_req_t* req) {
     std::string out = "[";
     if (g_hooks.scan) {
         bool first = true;
@@ -370,6 +369,8 @@ esp_err_t setup_post(httpd_req_t* req) {
         return result(req, false, "Missing X-NetworkDeck header", "403 Forbidden");
     return run_async(req, setup_work);
 }
+// A scan takes a few seconds: on the worker, so the status and deck polls keep answering meanwhile.
+esp_err_t scan_get(httpd_req_t* req) { return allowed(req, false) ? run_async(req, scan_work) : ESP_OK; }
 esp_err_t wifi_post(httpd_req_t* req) { return allowed(req, true) ? run_async(req, wifi_work) : ESP_OK; }
 esp_err_t network_post(httpd_req_t* req) { return allowed(req, true) ? run_async(req, network_work) : ESP_OK; }
 esp_err_t update_post(httpd_req_t* req) { return allowed(req, true) ? run_async(req, update_work) : ESP_OK; }
