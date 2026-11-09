@@ -191,9 +191,9 @@ const caption = computed(() => {
     0 calc(var(--mm) * 4) calc(var(--mm) * 10) calc(var(--mm) * -3) rgba(0, 0, 0, 0.45);
   --logo: #f2f2f2;
 }
-/* Elgato's white is not paper white: a faint cream. */
+/* Elgato's white is not paper white: the faintest cream. */
 .body[data-finish="white"] {
-  background: linear-gradient(180deg, #fbf9f4 0%, #f3f0e8 60%, #ebe7dd 100%);
+  background: linear-gradient(180deg, #fbfaf8 0%, #f2f1ed 60%, #eae8e4 100%);
   box-shadow:
     0 0 0 1px rgba(0, 0, 0, 0.08),
     inset 0 1px 0 #fff,

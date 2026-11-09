@@ -67,7 +67,7 @@ int main(int argc, char** argv) {
         ui.on_key(2, true, 0);  // Wi-Fi
         ui.on_key(2, false, 0);
         out(ui, "wifi-starting");
-        ui.set_hotspot({true, "Deck32-204C", "abcd2345", "192.168.4.1"});
+        ui.set_hotspot({true, "NetworkDeck ESP32-P4", "abcd2345", "192.168.4.1"});
         out(ui, "wifi");
         n.wifi_on = false;
         ui.set_hotspot({});
@@ -80,7 +80,7 @@ int main(int argc, char** argv) {
         none.link = "Hotspot";
         none.firmware = "1.01.017";
         hs.set_net(none);
-        hs.set_hotspot({true, "Deck32-204C", "abcd2345", "192.168.4.1"});
+        hs.set_hotspot({true, "NetworkDeck ESP32-P4", "abcd2345", "192.168.4.1"});
         out(hs, "hotspot");
     }
     return 0;

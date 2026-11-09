@@ -80,7 +80,7 @@ async function commit() {
       <span class="text-sm font-medium" id="finish-label">Finish</span>
       <div class="flex gap-2" role="radiogroup" aria-labelledby="finish-label">
         <button v-for="f in (['black', 'white'] as const)" :key="f" type="button" role="radio" :aria-checked="finish === f" :data-finish="f" :class="choice(finish === f)" @click="setFinish(f)">
-          <span :class="cn('size-3.5 rounded-full ring-1 ring-black/20', f === 'white' ? 'bg-[#f3f0e8]' : 'bg-zinc-800')" aria-hidden="true" />
+          <span :class="cn('size-3.5 rounded-full ring-1 ring-black/20', f === 'white' ? 'bg-[#f2f1ed]' : 'bg-zinc-800')" aria-hidden="true" />
           {{ f === "black" ? "Black" : "White" }}
         </button>
       </div>

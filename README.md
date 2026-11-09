@@ -4,19 +4,32 @@ A Stream Deck Network Dock on a Waveshare ESP32-P4-NANO (PoE). Plug a Stream Dec
 USB-A port; the official Stream Deck app adds it with "Add Network Device…" and drives it over the
 network, so your profiles and plugins run unchanged — no laptop next to the deck.
 
+![The web interface: the Stream Deck live, as the app draws it](docs/screenshots/console-light.png)
+
 - **Works with:** the Stream Deck app (macOS, tested with 7.6), Bitfocus Companion and anything built
   on `@elgato-stream-deck/tcp`. Decks: Stream Deck MK.2 (tested); the Mini's screens are in place.
 - **Network:** Ethernet with PoE, Wi-Fi when there's no cable, and a setup hotspot (QR code on the
   deck) when there's nothing to join.
 - **On the deck** while no app is connected: IP address, network, firmware, DHCP/static, an on-deck
   static IP editor, and confirmations for changes made in the web interface.
-- **Web interface** at the dock's address, behind a password: the deck live in the middle (what the
-  app draws on each key, and which key is pressed), lights for the deck and the network in the top
-  bar, the deck's details and screen brightness, Matter, and the settings (network, Wi-Fi, firmware
-  upload with automatic rollback, password).
+- **Web interface** at the dock's address, behind a password or passkeys: the deck live in the middle
+  (what the app draws on each key, and which key is pressed) with the computer the app runs on,
+  lights for the deck, the network and the dock's health in the top bar, the deck's and the dock's
+  details, a log, and the settings (system, network, Wi-Fi, users, appearance, firmware updates with
+  automatic rollback).
+- **REST API** with API keys (Connectors → REST API), described in [docs/api.md](docs/api.md).
 - **Matter:** add the dock to Home Assistant, Apple Home or Google Home and every key is a button
   there (press, release, long press), for automations — also while the Stream Deck app drives the
   deck.
+
+| | |
+|---|---|
+| ![Dark theme](docs/screenshots/console-dark.png) | ![The Network Deck panel: the board, chip, memory and temperature](docs/screenshots/network-deck.png) |
+| ![The log: sign-ins, updates, connections, restarts](docs/screenshots/logs.png) | ![Connectors: the REST API and its keys](docs/screenshots/connectors.png) |
+
+The dock's own screens on the deck, while no app is connected:
+
+![On the deck: the start page, Setup, and joining Wi-Fi](docs/screenshots/deck-screens.png)
 
 ## HTTPS and passkeys
 
@@ -29,7 +42,7 @@ Renaming the dock makes a new authority, to trust again.
 
 ## Matter
 
-Matter is off until you turn it on: open **Integrations → Matter** in the web interface (or the
+Matter is off until you turn it on: open **Connectors → Matter** in the web interface (or the
 Matter panel in the rail), choose **Set up Matter**, and scan the QR code (in Home Assistant: **Add Matter device**
 in the companion app), or type the setup code. Each dock has its own random code. The dock is
 uncertified — it uses the Matter SDK's test attestation — so the app asks before adding it; with
