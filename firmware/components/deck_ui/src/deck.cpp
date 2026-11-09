@@ -1,10 +1,15 @@
 #include "deck_ui/deck.hpp"
 
+#include <cstdio>
 #include <memory>
 #include <mutex>
+#include <utility>
 #include <vector>
 
+#include "soc/soc_caps.h"
+#if SOC_JPEG_CODEC_SUPPORTED
 #include "driver/jpeg_encode.h"
+#endif
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -17,7 +22,6 @@ namespace deck_ui {
 namespace {
 
 constexpr char TAG[] = "deck_ui";
-constexpr int kBrightness = 70;
 
 uint32_t now_ms() { return static_cast<uint32_t>(esp_timer_get_time() / 1000); }
 
@@ -33,13 +37,27 @@ Callbacks g_cb;
 std::mutex g_mutex;  // guards everything below
 std::unique_ptr<Ui> g_ui;
 const Model* g_model = nullptr;
+uint16_t g_pid = 0;
+int64_t g_last_key_write = 0;  // when the host last changed a key (esp_timer), for deck_json's "quiet_ms"  // the attached Elgato device, also one without dock screens
 NetInfo g_net;
 Hotspot g_hotspot;
 bool g_host = false;
 std::vector<bool> g_keys;
 std::vector<uint32_t> g_drawn;  // per-key image hash; 0 = must draw
-std::vector<std::vector<uint8_t>> g_images;  // last image sent per key (for the web preview)
+std::vector<std::vector<uint8_t>> g_images;  // dock screens: last image sent per key
+// The host's images, reassembled from its write reports, with a version per key for the web page.
+struct HostKey {
+    std::vector<uint8_t> building, image;
+    bool has_color = false;
+    Rgb color;
+    uint32_t version = 0;
+};
+std::vector<HostKey> g_host_keys;
+std::vector<uint32_t> g_dock_version;
+std::vector<bool> g_pressed;
+uint32_t g_version_seq = 1;
 bool g_brightness_set = false;
+int g_brightness = 70;
 Pending g_prompt;
 uint32_t g_next_prompt = 1;
 QueueHandle_t g_events = nullptr;
@@ -47,10 +65,12 @@ SemaphoreHandle_t g_answer = nullptr;
 SemaphoreHandle_t g_confirm_lock = nullptr;
 TaskHandle_t g_task = nullptr;
 
+#if SOC_JPEG_CODEC_SUPPORTED
 jpeg_encoder_handle_t g_jpeg = nullptr;
 uint8_t* g_jpeg_in = nullptr;
 uint8_t* g_jpeg_out = nullptr;
 size_t g_jpeg_in_cap = 0, g_jpeg_out_cap = 0;
+#endif
 
 bool owns_locked() { return g_model && (!g_host || g_prompt.active); }
 
@@ -70,6 +90,9 @@ bool encode(const Model& m, const Canvas& key, std::vector<uint8_t>& out) {
         out = bmp(m, px);
         return true;
     }
+#if !SOC_JPEG_CODEC_SUPPORTED
+    return false;  // gen2 decks need JPEG: only with the hardware encoder (the P4) so far
+#else
     if (!g_jpeg) {
         jpeg_encode_engine_cfg_t ecfg{};
         ecfg.timeout_ms = 100;
@@ -99,6 +122,7 @@ bool encode(const Model& m, const Canvas& key, std::vector<uint8_t>& out) {
         return false;
     out.assign(g_jpeg_out, g_jpeg_out + size);
     return true;
+#endif
 }
 
 // Draws every key whose image changed. Rendering happens under the lock; USB writes outside it.
@@ -106,11 +130,13 @@ void draw() {
     const Model* m;
     std::vector<std::pair<int, Canvas>> todo;
     bool set_brightness = false;
+    int brightness = 0;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (!owns_locked() || !g_ui) return;
         m = g_model;
         set_brightness = !g_brightness_set;
+        brightness = g_brightness;
         g_brightness_set = true;
         for (int k = 0; k < m->keys(); ++k) {
             Canvas c(m->key_px, m->key_px);
@@ -123,7 +149,7 @@ void draw() {
         }
     }
     if (set_brightness) {
-        auto b = brightness_report(*m, kBrightness);
+        auto b = brightness_report(*m, brightness);
         usb_bridge::set_feature(b.data(), b.size());
     }
     std::vector<uint8_t> img;
@@ -134,7 +160,10 @@ void draw() {
         }
         {
             std::lock_guard<std::mutex> lock(g_mutex);
-            if (k < static_cast<int>(g_images.size())) g_images[k] = img;
+            if (k < static_cast<int>(g_images.size())) {
+                g_images[k] = img;
+                g_dock_version[k] = ++g_version_seq;
+            }
         }
         for (const auto& r : image_reports(*m, k, img)) {
             if (!usb_bridge::write(r.data(), r.size(), pdMS_TO_TICKS(500))) {
@@ -185,12 +214,13 @@ void start(const Callbacks& cb) {
     g_events = xQueueCreate(8, sizeof(UiEvent));
     g_answer = xSemaphoreCreateBinary();
     g_confirm_lock = xSemaphoreCreateMutex();
-    xTaskCreatePinnedToCore(task, "deck_ui", 8192, nullptr, 5, &g_task, 1);
+    xTaskCreatePinnedToCore(task, "deck_ui", 16384, nullptr, 5, &g_task, portNUM_PROCESSORS - 1);
 }
 
 void deck_attached(uint16_t pid) {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_model = find_model(pid);
+    g_pid = pid;
     if (!g_model) {
         ESP_LOGI(TAG, "deck %04x: no dock screens for this model", pid);
         g_ui.reset();
@@ -202,6 +232,9 @@ void deck_attached(uint16_t pid) {
     g_keys.assign(g_model->keys(), false);
     g_drawn.assign(g_model->keys(), 0);
     g_images.assign(g_model->keys(), {});
+    g_host_keys.assign(g_model->keys(), HostKey{});
+    g_dock_version.assign(g_model->keys(), 0);
+    g_pressed.assign(g_model->keys(), false);
     g_brightness_set = false;
     ESP_LOGI(TAG, "%s: %d keys", g_model->name, g_model->keys());
     wake();
@@ -210,6 +243,7 @@ void deck_attached(uint16_t pid) {
 void deck_detached() {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_model = nullptr;
+    g_pid = 0;
     g_ui.reset();
     if (g_prompt.active) {
         g_prompt.active = false;
@@ -262,6 +296,13 @@ void set_net(const NetInfo& n) {
     wake();
 }
 
+void set_brightness(int percent) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_brightness = percent < 0 ? 0 : percent > 100 ? 100 : percent;
+    g_brightness_set = false;
+    wake();
+}
+
 void set_hotspot(const Hotspot& h) {
     std::lock_guard<std::mutex> lock(g_mutex);
     g_hotspot = h;
@@ -303,11 +344,114 @@ bool confirm(const std::string& question) {
     return yes;
 }
 
+void host_output(const uint8_t* report, size_t len) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_model) return;
+    ImagePart p;
+    if (!parse_image_report(*g_model, report, len, p)) return;
+    HostKey& k = g_host_keys[p.key];
+    if (p.part == 0) k.building.clear();
+    k.building.insert(k.building.end(), p.data, p.data + p.len);
+    if (!p.last) return;
+    if (g_model->format == Model::Format::Bmp && k.building.size() >= 6) {
+        // gen1 reports carry no length: the BMP's own file size says where the padding starts
+        const size_t size = k.building[2] | (k.building[3] << 8) | (k.building[4] << 16) | (size_t(k.building[5]) << 24);
+        if (size <= k.building.size()) k.building.resize(size);
+    }
+    k.image.swap(k.building);
+    k.building.clear();
+    k.has_color = false;
+    k.version = ++g_version_seq;
+    g_last_key_write = esp_timer_get_time();
+}
+
+void host_feature(const uint8_t* report, size_t len) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_model) return;
+    int key;
+    Rgb c;
+    if (!parse_fill_report(*g_model, report, len, key, c)) return;
+    HostKey& k = g_host_keys[key];
+    k.image.clear();
+    k.has_color = true;
+    k.color = c;
+    k.version = ++g_version_seq;
+    g_last_key_write = esp_timer_get_time();
+}
+
+void observe_input(const uint8_t* report, size_t len) {
+    std::vector<std::pair<int, bool>> changes;
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (!g_model) return;
+        auto keys = key_states(*g_model, report, len);
+        if (keys.size() != g_pressed.size()) return;
+        for (size_t k = 0; k < keys.size(); ++k)
+            if ((keys[k] != 0) != (g_pressed[k] != 0)) changes.emplace_back(static_cast<int>(k), keys[k] != 0);
+        g_pressed = keys;
+    }
+    if (g_cb.on_key)
+        for (const auto& [k, down] : changes) g_cb.on_key(k, down);
+}
+
 std::vector<uint8_t> key_image(int key, std::string& content_type) {
     std::lock_guard<std::mutex> lock(g_mutex);
     content_type = g_model && g_model->format == Model::Format::Bmp ? "image/bmp" : "image/jpeg";
-    if (key < 0 || key >= static_cast<int>(g_images.size())) return {};
-    return g_images[key];
+    if (!g_model || key < 0 || key >= g_model->keys()) return {};
+    return owns_locked() ? g_images[key] : g_host_keys[key].image;
+}
+
+std::string deck_json() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_pid) return "{\"attached\":false}";
+    char head[320];
+    if (!g_model) {
+        // A deck the dock bridges but has no live view of: the page draws its shape from the pid.
+        std::snprintf(head, sizeof(head), "{\"attached\":true,\"pid\":%u,\"live\":false,\"source\":\"%s\"", g_pid,
+                      g_host ? "app" : "dock");
+    } else {
+        std::snprintf(head, sizeof(head),
+                      "{\"attached\":true,\"pid\":%u,\"live\":true,\"model\":\"%s\",\"cols\":%d,\"rows\":%d,\"key_px\":%d,\"transform\":\"%s\",\"source\":\"%s\",\"brightness\":%d",
+                      g_pid, g_model->name, g_model->cols, g_model->rows, g_model->key_px, css_transform(*g_model),
+                      owns_locked() ? "dock" : "app", g_brightness);
+    }
+    std::string j = head;
+    if (usb_bridge::attached()) {
+        const auto info = usb_bridge::info();
+        auto clean = [](const std::string& in) {  // USB strings: keep them printable and JSON-safe
+            std::string o;
+            for (char c : in)
+                if (c >= 0x20 && c < 0x7f && c != '"' && c != '\\') o += c;
+            return o;
+        };
+        char rev[16];
+        std::snprintf(rev, sizeof(rev), "%x.%02x", info.bcd_device >> 8, info.bcd_device & 0xff);
+        j += ",\"product\":\"" + clean(info.product) + "\",\"serial\":\"" + clean(info.serial) + "\",\"usb_rev\":\"" + rev + "\"";
+    }
+    if (!g_model) return j + "}";
+    const bool dock = owns_locked();
+    {
+        // How long the keys have been still: the page shows a new page of keys once it has all of it.
+        const int64_t quiet = g_last_key_write ? (esp_timer_get_time() - g_last_key_write) / 1000 : 1000000;
+        j += ",\"quiet_ms\":" + std::to_string(quiet > 1000000 ? 1000000 : quiet);
+    }
+    j += ",\"keys\":[";
+    for (int k = 0; k < g_model->keys(); ++k) {
+        char b[64];
+        if (dock) {
+            std::snprintf(b, sizeof(b), "%s{\"v\":%u}", k ? "," : "", static_cast<unsigned>(g_images[k].empty() ? 0 : g_dock_version[k]));
+        } else if (g_host_keys[k].has_color) {
+            const Rgb c = g_host_keys[k].color;
+            std::snprintf(b, sizeof(b), "%s{\"v\":%u,\"color\":\"#%02x%02x%02x\"}", k ? "," : "", static_cast<unsigned>(g_host_keys[k].version), c.r, c.g, c.b);
+        } else {
+            std::snprintf(b, sizeof(b), "%s{\"v\":%u}", k ? "," : "", static_cast<unsigned>(g_host_keys[k].image.empty() ? 0 : g_host_keys[k].version));
+        }
+        j += b;
+    }
+    j += "],\"pressed\":[";
+    for (size_t k = 0; k < g_pressed.size(); ++k) j += (k ? "," : "") + std::string(g_pressed[k] ? "1" : "0");
+    j += "]}";
+    return j;
 }
 
 }  // namespace deck_ui

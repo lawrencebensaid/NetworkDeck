@@ -1,0 +1,114 @@
+/*
+ * The page's state: where the session is (checking, choose a password, sign in, signed in, the dock
+ * not answering), and while signed in the dock's status and the deck, polled.
+ */
+import { reactive } from "vue";
+
+import { api, whenSignedOut, type AuthState, type Deck, type Status, type SystemInfo } from "./api.ts";
+
+export type Phase = "checking" | "setup" | "signed-out" | "signed-in" | "unreachable";
+
+export const store = reactive({
+  phase: "checking" as Phase,
+  viaHotspot: false,
+  auth: null as AuthState | null,
+  status: null as Status | null,
+  deck: null as Deck | null,
+  system: null as SystemInfo | null,
+  lastSeen: 0,
+});
+
+let timers: number[] = [];
+
+function stopPolling() {
+  timers.forEach((t) => clearInterval(t));
+  timers = [];
+}
+
+async function pollStatus() {
+  try {
+    store.status = await api.status();
+    store.lastSeen = Date.now();
+  } catch {
+    /* a moment without the dock (it may be changing network) is shown by the network light */
+  }
+}
+
+/* Ask for the deck now (the live view does when it is waiting for the rest of a page of keys). */
+export function refreshDeck() {
+  void pollDeck();
+}
+
+async function pollSystem() {
+  try {
+    store.system = await api.system();
+  } catch {
+    /* as above */
+  }
+}
+
+async function pollDeck() {
+  try {
+    store.deck = await api.deck();
+    store.lastSeen = Date.now();
+  } catch {
+    /* as above */
+  }
+}
+
+function startPolling() {
+  stopPolling();
+  void pollStatus();
+  void pollDeck();
+  void pollSystem();
+  timers.push(window.setInterval(pollStatus, 4000));
+  timers.push(window.setInterval(pollSystem, 10000));
+  timers.push(window.setInterval(pollDeck, 350));
+}
+
+whenSignedOut(() => {
+  stopPolling();
+  store.phase = "signed-out";
+});
+
+export async function checkAuth() {
+  try {
+    const a = await api.auth();
+    store.auth = a;
+    store.viaHotspot = a.via_hotspot;
+    if (!a.password_set) store.phase = "setup";
+    else if (!a.signed_in) store.phase = "signed-out";
+    else {
+      store.phase = "signed-in";
+      startPolling();
+    }
+  } catch {
+    store.phase = "unreachable";
+    setTimeout(checkAuth, 3000);
+  }
+}
+
+export async function signOut() {
+  await api.logout();
+  stopPolling();
+  store.status = null;
+  store.deck = null;
+  store.phase = "signed-out";
+}
+
+export function signedIn() {
+  store.phase = "signed-in";
+  startPolling();
+}
+
+export async function refreshAuth() {
+  try {
+    store.auth = await api.auth();
+  } catch {
+    /* offline for a moment */
+  }
+}
+
+export function refreshStatus() {
+  return pollStatus();
+}

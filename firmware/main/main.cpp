@@ -3,28 +3,49 @@
 // Wiring only: usb_bridge (the deck) <-> dock_server (the Stream Deck app) while a host is connected,
 // deck_ui (the dock's own screens) otherwise; net, settings, web and OTA around them.
 
+#include <cctype>
 #include <cstdio>
+#include <cstring>
 #include <string>
+#include <utility>
 
 #include "deck_ui/deck.hpp"
 #include "dock_server.hpp"
 #include "esp_app_desc.h"
+#include "esp_chip_info.h"
+#include "esp_flash.h"
+#include "esp_heap_caps.h"
+#include "esp_idf_version.h"
 #include "esp_log.h"
+#include "esp_mac.h"
+#include "esp_timer.h"
+#include "driver/gpio.h"
+#include "driver/temperature_sensor.h"
+#include "led.hpp"
+#include "soc/soc_caps.h"
+#if CONFIG_SPIRAM
+#include "esp_psram.h"
+#endif
+#include "esp_netif_sntp.h"
+#include "eventlog.hpp"
+#include "nvs.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
+#include "matter.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "net.hpp"
 #include "nvs_flash.h"
 #include "settings.hpp"
+#include "tls.h"
 #include "usb_bridge.hpp"
 #include "web.hpp"
 
 namespace {
 
 constexpr char TAG[] = "deck32";
-constexpr char kFirmware[] = "1.00.000";  // what the dock reports to the Stream Deck app
+constexpr char kFirmware[] = "1.01.017";  // what the dock reports to the Stream Deck app (the Elgato dock's latest)
 
 std::string g_name, g_serial;
 QueueHandle_t g_actions = nullptr;  // deck_ui events handled off the deck_ui task (they may prompt)
@@ -42,7 +63,155 @@ std::string hex(const std::array<uint8_t, 6>& mac, size_t from) {
 deck_ui::Ip4 to_ui(const settings::Ip4& ip) { return {ip[0], ip[1], ip[2], ip[3]}; }
 settings::Ip4 from_ui(const deck_ui::Ip4& ip) { return {ip[0], ip[1], ip[2], ip[3]}; }
 
+using eventlog::Cat;
+using eventlog::Level;
+
+// The network as the log tells it, once per change.
+void log_network(const net::Status& s) {
+    static net::Link last_link = net::Link::None;
+    static std::string last_ip;
+    static bool first = true;
+    if (!first && s.link == last_link && s.ip == last_ip) return;
+    const bool had = !first && last_link != net::Link::None;
+    first = false;
+    last_link = s.link;
+    last_ip = s.ip;
+    switch (s.link) {
+        case net::Link::Ethernet:
+            if (!s.ip.empty()) eventlog::add(Cat::Network, Level::Info, "On Ethernet at %s", s.ip.c_str());
+            break;
+        case net::Link::Wifi:
+            eventlog::add(Cat::Network, Level::Info, "On Wi-Fi '%s' at %s", s.wifi_ssid.c_str(), s.ip.c_str());
+            break;
+        case net::Link::Hotspot:
+            eventlog::add(Cat::Network, Level::Warn, "Setup network '%s' open: no other network", s.hotspot_ssid.c_str());
+            break;
+        default:
+            if (had) eventlog::add(Cat::Network, Level::Warn, "Network lost");
+            break;
+    }
+}
+
+// The status LED: blue in setup or without a network, green when ready, purple while the app is on.
+bool g_led_on = true;
+void update_led() {
+    if (!g_led_on) return led::set(led::State::Off);
+    const auto s = net::status();
+    if (dock_server::host_connected()) led::set(led::State::AppConnected);
+    else if (s.link == net::Link::Ethernet || s.link == net::Link::Wifi) led::set(s.ip.empty() ? led::State::Setup : led::State::Ready);
+    else led::set(led::State::Setup);
+}
+
+// ── health: the chip's temperature ──
+temperature_sensor_handle_t g_temp_sensor = nullptr;
+float g_temp = -1000;  // °C, -1000 when not read
+constexpr float kWarmC = 75, kHotC = 90;
+
+void health_task(void*) {
+    // The sensor has fixed ranges: 20-100 °C reaches the alarm; -10-80 °C if a chip hasn't that one.
+    for (const auto& r : {std::pair<int, int>{20, 100}, std::pair<int, int>{-10, 80}}) {
+        temperature_sensor_config_t cfg = TEMPERATURE_SENSOR_CONFIG_DEFAULT(r.first, r.second);
+        if (temperature_sensor_install(&cfg, &g_temp_sensor) == ESP_OK) break;
+        g_temp_sensor = nullptr;
+    }
+    if (g_temp_sensor && temperature_sensor_enable(g_temp_sensor) != ESP_OK) g_temp_sensor = nullptr;
+    int level = 0;  // 0 fine, 1 warm, 2 hot
+    for (;;) {
+        float c;
+        if (g_temp_sensor && temperature_sensor_get_celsius(g_temp_sensor, &c) == ESP_OK) {
+            g_temp = c;
+            const int now = c >= kHotC ? 2 : c >= kWarmC ? 1 : 0;
+            if (now > level)
+                eventlog::add(Cat::System, now == 2 ? Level::Error : Level::Warn, "The chip is %s: %.0f °C",
+                              now == 2 ? "too hot" : "warm", static_cast<double>(c));
+            else if (now == 0 && level > 0)
+                eventlog::add(Cat::System, Level::Info, "The chip cooled down: %.0f °C", static_cast<double>(c));
+            level = now;
+        }
+        update_led();
+        vTaskDelay(pdMS_TO_TICKS(10000));
+    }
+}
+
+#if SOC_USB_OTG_SUPPORTED
+constexpr bool kUsbHost = true;
+#else
+constexpr bool kUsbHost = false;
+#endif
+#if CONFIG_ETH_USE_ESP32_EMAC
+constexpr bool kEthernet = true;
+#else
+constexpr bool kEthernet = false;
+#endif
+
+std::string mac_str(esp_mac_type_t type) {
+    uint8_t m[6];
+    if (esp_read_mac(m, type) != ESP_OK) return {};
+    char b[18];
+    std::snprintf(b, sizeof(b), "%02X:%02X:%02X:%02X:%02X:%02X", m[0], m[1], m[2], m[3], m[4], m[5]);
+    return b;
+}
+
+const char* reset_reason();
+
+// GET /api/system: the hardware (the Network Deck panel) and its options (Settings → System).
+std::string system_json() {
+    esp_chip_info_t chip;
+    esp_chip_info(&chip);
+    uint32_t flash = 0;
+    esp_flash_get_size(nullptr, &flash);
+    size_t psram = 0;
+#if CONFIG_SPIRAM
+    psram = esp_psram_get_size();
+#endif
+    const auto sys = settings::system();
+    char b[1152];
+    std::snprintf(
+        b, sizeof(b),
+        "{\"chip\":\"%s\",\"revision\":\"v%d.%d\",\"cores\":%d,\"cpu_mhz\":%d,\"flash_bytes\":%u,\"psram_bytes\":%u,"
+        "\"board\":\"%s\",\"wifi_via\":\"%s\",\"usb_host\":%s,\"ethernet\":%s,\"matter\":%s,"
+        "\"serial\":\"%s\",\"mac_base\":\"%s\",\"mac_ethernet\":\"%s\",\"mac_wifi\":\"%s\","
+        "\"idf\":\"%s\",\"firmware\":\"%s\",\"partition\":\"%s\",\"uptime\":%u,\"reset_reason\":\"%s\","
+        "\"heap_free\":%u,\"heap_min\":%u,\"heap_total\":%u,\"psram_free\":%u,\"temp_c\":%.1f,\"warm_c\":%.0f,\"hot_c\":%.0f,"
+        "\"led\":%s,\"led_gpio\":%d,\"default_led_gpio\":%d,\"usb_power_gpio\":%d,\"usb_data_pins\":\"%s\"}",
+        net::chip_name(), chip.revision / 100, chip.revision % 100, chip.cores, CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
+        static_cast<unsigned>(flash), static_cast<unsigned>(psram),
+#if CONFIG_IDF_TARGET_ESP32P4
+        "Waveshare ESP32-P4-NANO", "ESP32-C5 co-processor (esp-hosted)",
+#else
+        "", "",
+#endif
+        kUsbHost ? "true" : "false", kEthernet ? "true" : "false",
+        matter::available() ? "true" : "false", g_serial.c_str(), mac_str(ESP_MAC_BASE).c_str(),
+#if CONFIG_ETH_USE_ESP32_EMAC
+        mac_str(ESP_MAC_ETH).c_str(),
+#else
+        "",
+#endif
+        mac_str(ESP_MAC_WIFI_STA).c_str(), esp_get_idf_version(), esp_app_get_description()->version,
+        esp_ota_get_running_partition()->label, static_cast<unsigned>(esp_timer_get_time() / 1000000), reset_reason(),
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_total_size(MALLOC_CAP_INTERNAL)),
+        static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)), static_cast<double>(g_temp),
+        static_cast<double>(kWarmC), static_cast<double>(kHotC), sys.led ? "true" : "false", sys.led_gpio,
+        sys.default_led_gpio, sys.usb_power_gpio,
+        // The USB port's data lines are the chip's own (its internal PHY): fixed, not remappable.
+#if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32S2
+        "D− GPIO 19, D+ GPIO 20"
+#elif CONFIG_IDF_TARGET_ESP32P4
+        "the dedicated USB 2.0 high-speed pins"
+#else
+        ""
+#endif
+    );
+    return b;
+}
+
 void publish_net(const net::Status& s) {
+    log_network(s);
+    // A DHCP address is named in the HTTPS certificate from the next start (static ones always are).
+    if (s.link == net::Link::Ethernet || s.link == net::Link::Wifi) tls_set_ip4(s.ip.c_str());
     {
         unsigned a = 0, b = 0, c = 0, d = 0;
         std::array<uint8_t, 4> ip{};
@@ -60,9 +229,11 @@ void publish_net(const net::Status& s) {
     n.ip4 = to_ui(cfg.ip);
     n.mask = to_ui(cfg.mask);
     n.gateway = to_ui(cfg.gateway);
+    n.wifi_on = s.wifi_enabled;
+    n.wifi_ssid = s.wifi_ssid;
     deck_ui::set_net(n);
     deck_ui::Hotspot h;
-    h.active = s.link == net::Link::Hotspot;
+    h.active = !s.hotspot_ssid.empty();
     h.ssid = s.hotspot_ssid;
     h.password = s.hotspot_password;
     h.url = s.hotspot_ip;
@@ -78,6 +249,12 @@ void apply_network(const settings::Network& n) {
 // A confirmation on the deck. While the Stream Deck app is connected, its traffic to the deck is held
 // back for the prompt, and the deck is virtually replugged afterwards so the app draws again.
 bool ask(const std::string& question) {
+#if !SOC_USB_OTG_SUPPORTED
+    // No USB host on this chip, so never a deck to confirm on: signing in (or the setup hotspot) is the
+    // proof of being allowed.
+    (void)question;
+    return true;
+#endif
     const bool host = dock_server::host_connected();
     if (host) dock_server::set_paused(true);
     const bool yes = deck_ui::confirm(question);
@@ -105,10 +282,25 @@ void actions_task(void*) {
                 apply_network(n);
                 break;
             }
+            case deck_ui::UiEvent::Kind::OpenHotspot:
+            case deck_ui::UiEvent::Kind::CloseHotspot:
+                net::open_hotspot(ev.kind == deck_ui::UiEvent::Kind::OpenHotspot);
+                break;
+            case deck_ui::UiEvent::Kind::SetWifi: {
+                // On the deck itself: no confirmation needed (and the way back if Wi-Fi was turned off).
+                auto w = settings::wifi();
+                w.enabled = ev.yes;
+                settings::set_wifi(w);
+                net::join(w);
+                break;
+            }
             case deck_ui::UiEvent::Kind::FactoryReset:
                 if (ask("Factory reset?")) {
+                    eventlog::add(Cat::System, Level::Warn, "Factory reset from the deck");
+                    vTaskDelay(pdMS_TO_TICKS(200));  // the entry reaches the flash
                     settings::factory_reset();
                     vTaskDelay(pdMS_TO_TICKS(300));
+                    matter::unpair();  // Matter's own storage goes too, and it leaves every controller
                     esp_restart();
                 }
                 break;
@@ -116,6 +308,29 @@ void actions_task(void*) {
                 break;
         }
     }
+}
+
+std::string json_escape(const std::string& in) {
+    std::string o;
+    for (char c : in) {
+        if (c == '"' || c == '\\') o += '\\';
+        if (static_cast<unsigned char>(c) >= 0x20) o += c;
+    }
+    return o;
+}
+
+// The hostname: the one set in the web interface, or the dock's name in lower case (deck32-204c).
+std::string hostname() {
+    std::string h = settings::hostname();
+    if (!h.empty()) return h;
+    for (char c : g_name) h.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    return h;
+}
+
+unsigned deck_keys() {
+    if (!usb_bridge::attached()) return 15;
+    const auto* m = deck_ui::find_model(usb_bridge::info().pid);
+    return m ? static_cast<unsigned>(m->keys()) : 15;
 }
 
 std::string status_json() {
@@ -137,15 +352,113 @@ std::string status_json() {
     j += ",\"build\":\"" + std::string(esp_app_get_description()->version) + "\"";
     j += ",\"link\":\"" + std::string(net::link_name(s.link)) + "\",\"ip\":\"" + s.ip + "\"";
     j += ",\"wifi_available\":" + std::string(s.wifi_available ? "true" : "false");
-    j += ",\"wifi_ssid\":\"" + s.wifi_ssid + "\"";
+    j += ",\"wifi_enabled\":" + std::string(s.wifi_enabled ? "true" : "false");
+    j += ",\"wifi_ssid\":\"" + json_escape(s.wifi_ssid) + "\"";
+    j += ",\"wifi_rssi\":" + std::to_string(net::wifi_rssi());
+    j += ",\"hostname\":\"" + net::hostname() + "\"";
     j += ",\"dhcp\":" + std::string(cfg.dhcp ? "true" : "false");
     j += ",\"static_ip\":\"" + ip(cfg.ip) + "\",\"static_mask\":\"" + ip(cfg.mask) + "\",\"static_gateway\":\"" + ip(cfg.gateway) + "\"";
     j += ",\"host\":" + std::string(dock_server::host_connected() ? "true" : "false");
+    {
+        const auto h = dock_server::host();
+        j += ",\"host_ip\":\"" + h.ip + "\",\"host_seconds\":" + std::to_string(h.seconds);
+        j += ",\"host_name\":\"" + json_escape(h.name) + "\"";
+    }
     j += ",\"deck\":\"" + std::string(deck_name) + "\"}";
     return j;
 }
 
+std::string matter_json() {
+    const auto m = matter::status();
+    std::string j = "{\"enabled\":" + std::string(settings::matter_enabled() ? "true" : "false");
+    j += ",\"running\":" + std::string(m.running ? "true" : "false");
+    j += ",\"fabrics\":" + std::to_string(m.fabrics);
+    j += ",\"window_open\":" + std::string(m.window_open ? "true" : "false");
+    j += ",\"window_seconds\":" + std::to_string(m.window_seconds);
+    j += ",\"qr\":\"" + m.qr + "\",\"manual\":\"" + m.manual + "\"}";  // base38 and digits: nothing to escape
+    return j;
+}
+
+// Leaving every controller restarts the dock: give the web reply a moment to go out first.
+std::string g_last_host;  // "Lawrence's MacBook Pro (10.0.1.137)", for the disconnect entry
+
+// Who connected: the computer's name (the router's reverse DNS, else NetBIOS), then logged.
+void describe_host_task(void*) {
+    const std::string ip = dock_server::host().ip;
+    const net::Peer p = ip.empty() ? net::Peer{} : net::describe(ip);
+    dock_server::set_host_info(ip, p.name, p.hostname);
+    g_last_host = p.name.empty() ? ip : p.name + " (" + ip + ")";
+    eventlog::add(Cat::Connection, Level::Info, "Stream Deck app connected from %s", g_last_host.c_str());
+    vTaskDelete(nullptr);
+}
+
+const char* reset_reason() {
+    switch (esp_reset_reason()) {
+        case ESP_RST_POWERON: return "power on";
+        case ESP_RST_SW: return "a restart";
+        case ESP_RST_PANIC: return "a crash";
+        case ESP_RST_INT_WDT:
+        case ESP_RST_TASK_WDT:
+        case ESP_RST_WDT: return "a watchdog reset (it hung)";
+        case ESP_RST_BROWNOUT: return "a brownout (the power dipped)";
+        case ESP_RST_EXT: return "the reset button";
+        case ESP_RST_USB: return "a USB reset";
+        default: return "an unknown reset";
+    }
+}
+
+// The start in the log: why, and whether the firmware changed since the last start.
+void log_start() {
+    const char* version = esp_app_get_description()->version;
+    const esp_reset_reason_t why = esp_reset_reason();
+    const Level level = why == ESP_RST_PANIC || why == ESP_RST_INT_WDT || why == ESP_RST_TASK_WDT || why == ESP_RST_WDT ||
+                                why == ESP_RST_BROWNOUT
+                            ? Level::Error
+                            : Level::Info;
+    eventlog::add(Cat::System, level, "Started after %s (firmware %s)", reset_reason(), version);
+    nvs_handle_t h;
+    if (nvs_open("deck32", NVS_READWRITE, &h) != ESP_OK) return;
+    char was[32] = "";
+    size_t len = sizeof(was);
+    const bool known = nvs_get_str(h, "fwver", was, &len) == ESP_OK;
+    if (known && std::strcmp(was, version) != 0) {
+        const esp_partition_t* bad = esp_ota_get_last_invalid_partition();
+        esp_app_desc_t bad_desc{};
+        if (bad && esp_ota_get_partition_description(bad, &bad_desc) == ESP_OK && std::strcmp(bad_desc.version, was) != 0 &&
+            std::strcmp(bad_desc.version, version) != 0)
+            eventlog::add(Cat::Update, Level::Error, "Firmware %s did not start: back on %s", bad_desc.version, version);
+        else
+            eventlog::add(Cat::Update, Level::Info, "Updated to %s from %s", version, was);
+    }
+    if (!known || std::strcmp(was, version) != 0) {
+        nvs_set_str(h, "fwver", version);
+        nvs_commit(h);
+    }
+    nvs_close(h);
+}
+
+void on_time_sync(struct timeval*) {
+    static bool once = false;
+    if (!once) eventlog::add(Cat::System, Level::Info, "Clock set from the network");
+    once = true;
+}
+
+void matter_off_task(void*) {
+    vTaskDelay(pdMS_TO_TICKS(500));
+    matter::unpair();
+    esp_restart();
+}
+
 }  // namespace
+
+// What the HTTPS certificate names (components/tls): the hostname, and the static address if any.
+extern "C" void tls_host_hostname(char* out, size_t len) { std::snprintf(out, len, "%s", hostname().c_str()); }
+extern "C" bool tls_host_static_ip(char* out, size_t len) {
+    const auto n = settings::network();
+    if (n.dhcp) return false;
+    std::snprintf(out, len, "%u.%u.%u.%u", n.ip[0], n.ip[1], n.ip[2], n.ip[3]);
+    return true;
+}
 
 extern "C" void app_main(void) {
     esp_err_t err = nvs_flash_init();
@@ -155,6 +468,19 @@ extern "C" void app_main(void) {
     }
     ESP_ERROR_CHECK(err);
     settings::load();
+    eventlog::start();
+    log_start();
+    {
+        const auto sys = settings::system();
+        if (sys.usb_power_gpio >= 0) {  // power the USB port before the deck is looked for
+            gpio_reset_pin(static_cast<gpio_num_t>(sys.usb_power_gpio));
+            gpio_set_direction(static_cast<gpio_num_t>(sys.usb_power_gpio), GPIO_MODE_OUTPUT);
+            gpio_set_level(static_cast<gpio_num_t>(sys.usb_power_gpio), 1);
+        }
+        g_led_on = sys.led;
+        if (sys.led) led::start(sys.led_gpio);
+        led::set(led::State::Setup);
+    }
 
     const auto mac = net::mac();
     cora::DockIdentity identity;
@@ -167,14 +493,22 @@ extern "C" void app_main(void) {
              esp_app_get_description()->version);
 
     g_actions = xQueueCreate(4, sizeof(deck_ui::UiEvent));
-    xTaskCreatePinnedToCore(actions_task, "actions", 4096, nullptr, 4, nullptr, 1);
+    xTaskCreatePinnedToCore(actions_task, "actions", 4096, nullptr, 4, nullptr, portNUM_PROCESSORS - 1);
 
     deck_ui::Callbacks ui_cb;
     ui_cb.on_event = [](const deck_ui::UiEvent& ev) { xQueueSend(g_actions, &ev, 0); };
     ui_cb.on_replug = [] { dock_server::replug(); };
+    ui_cb.on_key = [](int key, bool down) { matter::key(static_cast<unsigned>(key), down); };
     deck_ui::start(ui_cb);
+    deck_ui::set_brightness(settings::deck_brightness());
 
     ESP_ERROR_CHECK(net::start(g_name, publish_net));
+    {
+        esp_sntp_config_t sntp = ESP_NETIF_SNTP_DEFAULT_CONFIG("pool.ntp.org");
+        sntp.sync_cb = on_time_sync;
+        esp_netif_sntp_init(&sntp);
+    }
+    net::set_hostname(hostname());
     publish_net(net::status());
 
     dock_server::Config config;
@@ -182,20 +516,37 @@ extern "C" void app_main(void) {
     config.on_host_change = [](bool connected) {
         ESP_LOGI(TAG, "host %s", connected ? "connected" : "disconnected");
         deck_ui::set_host(connected);
+        update_led();
+        if (connected) {
+            xTaskCreatePinnedToCore(describe_host_task, "host_name", 6144, nullptr, 3, nullptr, 0);
+        } else {
+            eventlog::add(Cat::Connection, Level::Info, "Stream Deck app disconnected%s%s", g_last_host.empty() ? "" : ": ",
+                          g_last_host.c_str());
+            g_last_host.clear();
+        }
     };
+    config.on_host_output = deck_ui::host_output;
+    config.on_host_feature = deck_ui::host_feature;
     dock_server::start(config);
 
     usb_bridge::Callbacks cb;
     cb.on_attach = [](const usb_bridge::DeckInfo& info) {
+        eventlog::add(Cat::Deck, Level::Info, "%s plugged in (serial %s)", info.product.empty() ? "Stream Deck" : info.product.c_str(),
+                      info.serial.c_str());
         dock_server::deck_attached(info);
+        net::set_hotspot_open(false);  // now there is a deck to show the setup network's password on
         deck_ui::deck_attached(info.pid);
+        if (const auto* m = deck_ui::find_model(info.pid)) matter::remember_keys(static_cast<unsigned>(m->keys()));
     };
     cb.on_detach = [] {
         ESP_LOGI(TAG, "deck unplugged");
+        eventlog::add(Cat::Deck, Level::Info, "Stream Deck unplugged");
+        net::set_hotspot_open(true);
         deck_ui::deck_detached();
         dock_server::deck_detached();
     };
     cb.on_input = [](const uint8_t* report, size_t len) {
+        deck_ui::observe_input(report, len);
         if (deck_ui::owns_deck()) {
             deck_ui::input(report, len);
         } else {
@@ -206,8 +557,40 @@ extern "C" void app_main(void) {
 
     ESP_ERROR_CHECK(net::start_mdns(g_name, identity.serial, cora::kDockPort));
 
+    // Matter (Home Assistant, Apple Home): off until it is set up in the web interface. A dock that
+    // ran Matter before it was opt-in has a setup code: it keeps running it.
+    if (!settings::matter_enabled() && matter::has_setup_code()) settings::set_matter_enabled(true);
+    if (settings::matter_enabled())
+        if (esp_err_t err = matter::start(deck_keys(), g_name); err != ESP_OK) ESP_LOGE(TAG, "Matter did not start: %s", esp_err_to_name(err));
+
     web::Hooks hooks;
     hooks.status_json = status_json;
+    hooks.system_json = system_json;
+    hooks.set_system = [](const settings::System& sys) {
+        const auto was = settings::system();
+        settings::set_system(sys);
+        g_led_on = sys.led;
+        if (sys.led) led::start(sys.led_gpio);  // a new pin applies at the next start
+        update_led();
+        if (sys.led_gpio != was.led_gpio || sys.usb_power_gpio != was.usb_power_gpio)
+            eventlog::add(Cat::System, Level::Info, "Pins changed (LED %d, USB power %d): applied at the next start",
+                          sys.led_gpio, sys.usb_power_gpio);
+    };
+    hooks.deck_json = [] {
+        // The finish chosen for this deck, by serial (neither USB nor the deck says its colour).
+        std::string j = deck_ui::deck_json();
+        if (usb_bridge::attached() && j.size() > 1 && j.back() == '}') {
+            const std::string f = settings::deck_finish(usb_bridge::info().serial);
+            j.insert(j.size() - 1, ",\"finish\":\"" + f + "\"");
+        }
+        return j;
+    };
+    hooks.set_deck_finish = [](const std::string& f) {
+        if (!usb_bridge::attached()) return false;
+        settings::set_deck_finish(usb_bridge::info().serial, f);
+        return true;
+    };
+    hooks.hostname = [] { return net::hostname(); };
     hooks.scan = [] {
         std::vector<web::Network> out;
         for (const auto& r : net::scan()) out.push_back({r.ssid, r.rssi, r.secure});
@@ -221,7 +604,29 @@ extern "C" void app_main(void) {
         net::join(w);
     };
     hooks.set_network = apply_network;
+    hooks.set_brightness = [](int percent) {
+        settings::set_deck_brightness(percent);
+        deck_ui::set_brightness(percent);
+    };
+    hooks.matter_json = matter_json;
+    hooks.matter_open = [] { return matter::open_window() == ESP_OK; };
+    hooks.matter_setup = [] {
+        settings::set_matter_enabled(true);
+        if (matter::status().running) return true;
+        const esp_err_t err = matter::start(deck_keys(), g_name);
+        if (err != ESP_OK) ESP_LOGE(TAG, "Matter did not start: %s", esp_err_to_name(err));
+        return err == ESP_OK;
+    };
+    hooks.matter_off = [] {
+        settings::set_matter_enabled(false);
+        return xTaskCreate(matter_off_task, "matter_off", 8192, nullptr, 5, nullptr) == pdPASS;
+    };
+    hooks.set_hostname = [](const std::string& h) {
+        settings::set_hostname(h);
+        net::set_hostname(h.empty() ? hostname() : h);
+    };
     ESP_ERROR_CHECK(web::start(hooks));
+    xTaskCreatePinnedToCore(health_task, "health", 4096, nullptr, 2, nullptr, 0);
 
     // The new image started its network and services: keep it (otherwise the bootloader rolls back).
     esp_ota_img_states_t state;

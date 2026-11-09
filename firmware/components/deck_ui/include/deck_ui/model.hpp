@@ -39,4 +39,20 @@ std::vector<uint8_t> brightness_report(const Model& m, int percent);
 // Key states from an input report (empty if it isn't a key report).
 std::vector<bool> key_states(const Model& m, const uint8_t* report, size_t len);
 
+// One image write report from the host, split up (for the web interface's live view).
+struct ImagePart {
+    int key = 0;
+    int part = 0;
+    bool last = false;
+    const uint8_t* data = nullptr;
+    size_t len = 0;
+};
+bool parse_image_report(const Model& m, const uint8_t* report, size_t len, ImagePart& out);
+
+// A gen2 solid-colour fill (feature 03 06 <key> <r> <g> <b>).
+bool parse_fill_report(const Model& m, const uint8_t* report, size_t len, int& key, Rgb& color);
+
+// CSS transform that turns a key image in the deck's orientation upright again.
+const char* css_transform(const Model& m);
+
 }  // namespace deck_ui

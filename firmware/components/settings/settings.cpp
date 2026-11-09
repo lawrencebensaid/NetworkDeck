@@ -2,6 +2,7 @@
 
 #include <cstring>
 #include <mutex>
+#include <vector>
 
 #include "esp_log.h"
 #include "nvs.h"
@@ -15,6 +16,10 @@ constexpr char kNs[] = "deck32";
 std::mutex g_mutex;
 Network g_net;
 Wifi g_wifi;
+int g_brightness = 70;
+std::string g_hostname;
+bool g_matter = false;
+int g_rest = -1;  // the REST API connector: -1 never set (on if API keys exist, see web)
 
 uint32_t pack(const Ip4& ip) { return (uint32_t(ip[0]) << 24) | (uint32_t(ip[1]) << 16) | (uint32_t(ip[2]) << 8) | ip[3]; }
 Ip4 unpack(uint32_t v) {
@@ -46,8 +51,17 @@ void load() {
     if (nvs_get_u32(h, "ip", &v) == ESP_OK) g_net.ip = unpack(v);
     if (nvs_get_u32(h, "mask", &v) == ESP_OK) g_net.mask = unpack(v);
     if (nvs_get_u32(h, "gw", &v) == ESP_OK) g_net.gateway = unpack(v);
+    uint8_t wifi_on = 1;
+    nvs_get_u8(h, "wifi_on", &wifi_on);
+    g_wifi.enabled = wifi_on != 0;
+    g_hostname = get_str(h, "host");
+    uint8_t matter = 0;
+    nvs_get_u8(h, "matter", &matter);
+    g_matter = matter != 0;
     g_wifi.ssid = get_str(h, "ssid");
     g_wifi.password = get_str(h, "pass");
+    uint8_t b;
+    if (nvs_get_u8(h, "bright", &b) == ESP_OK && b <= 100) g_brightness = b;
     nvs_close(h);
     ESP_LOGI(TAG, "network %s, Wi-Fi %s", g_net.dhcp ? "DHCP" : "static", g_wifi.ssid.empty() ? "not set" : g_wifi.ssid.c_str());
 }
@@ -80,8 +94,159 @@ void set_wifi(const Wifi& w) {
     g_wifi = w;
     nvs_handle_t h;
     if (nvs_open(kNs, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, "wifi_on", w.enabled ? 1 : 0);
     nvs_set_str(h, "ssid", w.ssid.c_str());
     nvs_set_str(h, "pass", w.password.c_str());
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+// "SERIAL=w;SERIAL=b;…", newest last.
+std::string deck_finish(const std::string& serial) {
+    nvs_handle_t h;
+    if (serial.empty() || nvs_open(kNs, NVS_READONLY, &h) != ESP_OK) return {};
+    const std::string all = get_str(h, "finish");
+    nvs_close(h);
+    const std::string key = serial + "=";
+    for (size_t at = 0; at < all.size();) {
+        const size_t end = all.find(';', at);
+        const std::string item = all.substr(at, end == std::string::npos ? std::string::npos : end - at);
+        if (item.compare(0, key.size(), key) == 0) return item.substr(key.size()) == "w" ? "white" : "black";
+        if (end == std::string::npos) break;
+        at = end + 1;
+    }
+    return {};
+}
+
+void set_deck_finish(const std::string& serial, const std::string& finish) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    nvs_handle_t h;
+    if (serial.empty() || serial.find_first_of("=;") != std::string::npos || nvs_open(kNs, NVS_READWRITE, &h) != ESP_OK) return;
+    const std::string all = get_str(h, "finish");
+    std::vector<std::string> items;
+    for (size_t at = 0; at < all.size();) {
+        const size_t end = all.find(';', at);
+        std::string item = all.substr(at, end == std::string::npos ? std::string::npos : end - at);
+        if (!item.empty() && item.compare(0, serial.size() + 1, serial + "=") != 0) items.push_back(item);
+        if (end == std::string::npos) break;
+        at = end + 1;
+    }
+    items.push_back(serial + "=" + (finish == "white" ? "w" : "b"));
+    while (items.size() > 8) items.erase(items.begin());
+    std::string out;
+    for (const auto& i : items) out += (out.empty() ? "" : ";") + i;
+    nvs_set_str(h, "finish", out.c_str());
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+// ── system ──
+// Defaults per chip: ESP32-C6 dev boards carry a WS2812 on GPIO 8; the P4-NANO has none.
+#if CONFIG_IDF_TARGET_ESP32C6
+constexpr int kDefaultLedGpio = 8;
+#else
+constexpr int kDefaultLedGpio = -1;
+#endif
+
+System system() {
+    System sys;
+    sys.led_gpio = kDefaultLedGpio;
+    sys.default_led_gpio = kDefaultLedGpio;
+    nvs_handle_t h;
+    if (nvs_open(kNs, NVS_READONLY, &h) != ESP_OK) return sys;
+    uint8_t on = 1;
+    int16_t pin = 0;
+    if (nvs_get_u8(h, "led", &on) == ESP_OK) sys.led = on != 0;
+    if (nvs_get_i16(h, "led_gpio", &pin) == ESP_OK) sys.led_gpio = pin;
+    if (nvs_get_i16(h, "usb_pwr", &pin) == ESP_OK) sys.usb_power_gpio = pin;
+    nvs_close(h);
+    return sys;
+}
+
+void set_system(const System& sys) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    nvs_handle_t h;
+    if (nvs_open(kNs, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, "led", sys.led ? 1 : 0);
+    nvs_set_i16(h, "led_gpio", static_cast<int16_t>(sys.led_gpio));
+    nvs_set_i16(h, "usb_pwr", static_cast<int16_t>(sys.usb_power_gpio));
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+int deck_brightness() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_brightness;
+}
+
+void set_deck_brightness(int percent) {
+    if (percent < 0) percent = 0;
+    if (percent > 100) percent = 100;
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_brightness = percent;
+    nvs_handle_t h;
+    if (nvs_open(kNs, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, "bright", static_cast<uint8_t>(percent));
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+std::string hostname() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_hostname;
+}
+
+bool valid_hostname(const std::string& h) {
+    if (h.empty() || h.size() > 63 || h.front() == '-' || h.back() == '-') return false;
+    for (char c : h)
+        if (!((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-')) return false;
+    return true;
+}
+
+void set_hostname(const std::string& host) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_hostname = host;
+    nvs_handle_t h;
+    if (nvs_open(kNs, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_str(h, "host", host.c_str());
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+bool matter_enabled() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_matter;
+}
+
+void set_matter_enabled(bool on) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_matter = on;
+    nvs_handle_t h;
+    if (nvs_open(kNs, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, "matter", on ? 1 : 0);
+    nvs_commit(h);
+    nvs_close(h);
+}
+
+int rest_api() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (g_rest < 0) {
+        nvs_handle_t h;
+        uint8_t v = 0;
+        if (nvs_open(kNs, NVS_READONLY, &h) == ESP_OK) {
+            if (nvs_get_u8(h, "rest", &v) == ESP_OK) g_rest = v ? 1 : 0;
+            nvs_close(h);
+        }
+    }
+    return g_rest;
+}
+
+void set_rest_api(bool on) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_rest = on ? 1 : 0;
+    nvs_handle_t h;
+    if (nvs_open(kNs, NVS_READWRITE, &h) != ESP_OK) return;
+    nvs_set_u8(h, "rest", on ? 1 : 0);
     nvs_commit(h);
     nvs_close(h);
 }
@@ -96,6 +261,9 @@ void factory_reset() {
     }
     g_net = Network{};
     g_wifi = Wifi{};
+    g_brightness = 70;
+    g_hostname.clear();
+    g_matter = false;
     ESP_LOGW(TAG, "factory reset: network and Wi-Fi settings erased");
 }
 

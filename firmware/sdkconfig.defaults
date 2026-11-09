@@ -1,20 +1,23 @@
+# Every chip. Chip-specific settings: sdkconfig.defaults.<target> (ESP-IDF reads it after this one).
+# The default target is the ESP32-P4; build for another with idf.py -B build-<chip> -DIDF_TARGET=<chip>
+# -DSDKCONFIG=sdkconfig.<chip> build (see README.md).
 CONFIG_IDF_TARGET="esp32p4"
-CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
-CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
-CONFIG_SPIRAM=y
 CONFIG_FREERTOS_HZ=1000
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
-# Stream Deck gen2 decks use 1024-byte interrupt OUT reports
-CONFIG_USB_HOST_HW_BUFFER_BIAS_PERIODIC_OUT=y
-CONFIG_ETH_ENABLED=y
-CONFIG_ETH_USE_ESP32_EMAC=y
 CONFIG_LWIP_MAX_SOCKETS=16
-CONFIG_LWIP_TCP_SND_BUF_DEFAULT=16384
-CONFIG_LWIP_TCP_WND_DEFAULT=16384
 
 # Firmware updates: roll back to the previous image if a new one doesn't mark itself valid.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
-# Wi-Fi co-processor: the P4-NANO used here carries an ESP32-C5 (esp-hosted 2.12.9), not a C6.
-CONFIG_SLAVE_IDF_TARGET_ESP32C5=y
+# ── HTTPS (components/tls, components/web) ──
+# The dock is its own certificate authority (made on first start, name-constrained to its own names):
+# trusting it once gives https://<name>.local a padlock, which passkeys need.
+CONFIG_ESP_HTTPS_SERVER_ENABLE=y
+CONFIG_MBEDTLS_X509_CREATE_C=y
+CONFIG_MBEDTLS_X509_CRT_WRITE_C=y
+# A full handshake costs ~300 ms; the page opens several connections.
+CONFIG_ESP_TLS_SERVER_SESSION_TICKETS=y
+
+# The Wi-Fi and IP event handlers log and call into esp-hosted: more than the default 2304 bytes.
+CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE=4096

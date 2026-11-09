@@ -1,0 +1,91 @@
+# NetworkDeck's self-hosted GitHub Actions runner (label networkdeck-ci) in the k3s cluster's
+# github-runners namespace. It runs its own Docker daemon (privileged) because the workflow's jobs run
+# in Espressif's ESP-IDF image. Applied by setup.sh, which also makes the registration token secret.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: docker-daemon-networkdeck
+  namespace: github-runners
+data:
+  # The cluster network's MTU is 1450: Docker's default 1500 stalls pulls and downloads.
+  daemon.json: '{"mtu": 1450, "default-network-opts": {"bridge": {"com.docker.network.driver.mtu": "1450"}}}'
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: runner-networkdeck
+  namespace: github-runners
+spec:
+  replicas: 1
+  serviceName: runner-networkdeck
+  selector:
+    matchLabels:
+      app: runner-networkdeck
+  persistentVolumeClaimRetentionPolicy:
+    whenDeleted: Retain
+    whenScaled: Retain
+  template:
+    metadata:
+      labels:
+        app: runner-networkdeck
+        role: github-runner
+    spec:
+      priorityClassName: ci-low
+      terminationGracePeriodSeconds: 60
+      securityContext:
+        seccompProfile:
+          type: RuntimeDefault
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: kubernetes.io/hostname
+                    operator: In
+                    values: [bossmare-k3s-1, bossmare-k3s-2]
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                topologyKey: kubernetes.io/hostname
+                labelSelector:
+                  matchLabels:
+                    role: github-runner
+      containers:
+        - name: runner
+          image: myoung34/github-runner:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            - { name: RUNNER_NAME, value: github-actions-linux-networkdeck }
+            - { name: REPO_URL, value: https://github.com/lawrencebensaid/NetworkDeck }
+            - { name: RUNNER_SCOPE, value: repo }
+            - { name: LABELS, value: networkdeck-ci }
+            - { name: RUNNER_WORKDIR, value: /work }
+            - { name: START_DOCKER_SERVICE, value: "true" }
+            # Registered once; the configuration is kept on this volume across restarts.
+            - { name: CONFIGURED_ACTIONS_RUNNER_FILES_DIR, value: /runner-cfg }
+            - { name: DISABLE_AUTOMATIC_DEREGISTRATION, value: "true" }
+            - name: RUNNER_TOKEN
+              valueFrom:
+                secretKeyRef: { name: runner-networkdeck-token, key: token }
+          resources:
+            requests: { cpu: 100m, memory: 512Mi }
+            limits: { cpu: "4", memory: 6Gi }
+          volumeMounts:
+            - { name: runner-cfg, mountPath: /runner-cfg }
+            - { name: docker, mountPath: /var/lib/docker }
+            - { name: work, mountPath: /work }
+            - { name: docker-daemon, mountPath: /etc/docker/daemon.json, subPath: daemon.json }
+      volumes:
+        - name: docker-daemon
+          configMap:
+            name: docker-daemon-networkdeck
+  volumeClaimTemplates:
+    - metadata: { name: runner-cfg }
+      spec: { accessModes: [ReadWriteOnce], storageClassName: ceph-rbd, resources: { requests: { storage: 1Gi } } }
+    - metadata: { name: docker }
+      spec: { accessModes: [ReadWriteOnce], storageClassName: ceph-rbd, resources: { requests: { storage: 40Gi } } }
+    - metadata: { name: work }
+      spec: { accessModes: [ReadWriteOnce], storageClassName: ceph-rbd, resources: { requests: { storage: 20Gi } } }

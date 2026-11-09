@@ -1,0 +1,1075 @@
+/*
+ * The device is its own certificate authority. A browser will not accept a
+ * self-signed *leaf* certificate as trusted no matter how it is imported - a
+ * trust anchor has to be a CA - so instead the device generates a small root CA
+ * once, keeps it in NVS, and signs its server (leaf) certificate with it. The
+ * operator imports the CA (offered at /cert.pem) one time; from then on every
+ * certificate the device serves is trusted, and the browser turns on the
+ * WebSocket channel and the H.264 decoder that a secure context requires.
+ *
+ * The CA's private key sits unencrypted in flash, and a root that is trusted
+ * for every name is a very good thing to steal. So the CA is name-constrained
+ * (a critical nameConstraints extension, see tls_name_constraints()): whoever
+ * has the key can sign for this device's names, "<hostname>.local" and the
+ * hostname, and for private and link-local addresses, and for nothing else - no
+ * website. What that costs is that the CA is for one hostname: a renamed device
+ * needs a new CA, and the operator imports it again. An address that changes
+ * within those ranges - a new DHCP lease - costs only a new leaf, under the same
+ * CA, so the import survives.
+ *
+ * The device serves the leaf alone. The CA's critical extension is one mbedTLS
+ * cannot read, so a chain that carried it would not load into the TLS server at
+ * all; and a client that trusts the CA has it already.
+ */
+#include "tls.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <strings.h>
+
+#include "esp_log.h"
+#include "esp_mac.h"
+#include "esp_random.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
+#include "nvs.h"
+#include "nvs_flash.h"
+
+/*
+ * IDF 6 ships mbedTLS 4, where key material lives behind PSA: keys are generated
+ * with PSA and copied into a pk context (which, per the API, becomes fully
+ * independent of the PSA key afterwards). The CA key is stored as PEM and parsed
+ * back to sign each new leaf.
+ */
+#include "mbedtls/asn1.h"
+#include "mbedtls/oid.h"
+#include "mbedtls/pk.h"
+#include "mbedtls/x509_crt.h"
+#include "psa/crypto.h"
+
+#include "tls_names.h"
+
+#define TAG "tls"
+
+#define NVS_NAMESPACE "nd_tls"
+#define NVS_KEY_CA_CERT "ca_cert"
+#define NVS_KEY_CA_KEY "ca_key"
+#define NVS_KEY_CERT "cert"
+#define NVS_KEY_KEY "key"
+/** What the stored leaf was issued for (hostname, or "hostname|ip" with a static
+ *  address), so a renamed or re-addressed device re-issues it. */
+#define NVS_KEY_NAME "name"
+/** Operator-supplied certificate and key (PEM), used instead of the self-signed
+ *  identity when present. */
+#define NVS_KEY_BYO_CERT "byo_cert"
+#define NVS_KEY_BYO_KEY "byo_key"
+/** Bumped whenever the generated CA's shape changes (subject, extensions, ...),
+ *  so a firmware update quietly re-issues the CA instead of keeping an old one
+ *  that no longer matches - no NVS wipe, no lost settings. */
+#define NVS_KEY_CA_VER "ca_ver"
+/* v3: CA subject now carries a per-device MAC suffix (ca_hostname) so two devices
+ * on the default hostname no longer share an identical CA subject.
+ * v4: the subject names the product (tls_ca_subject), and the new
+ * CA is named after the device's current hostname.
+ * v5: the CA is name-constrained to this device's names (tls_name_constraints),
+ * which the unconstrained v4 CA - trusted for any site by whoever imported it,
+ * with its key in flash - cannot be made into, so it is replaced.
+ * v6 (NetworkDeck): no second MAC suffix on a hostname that ends in it already. */
+#define CA_VERSION 6
+/** Bumped to force every cached leaf to be re-issued (e.g. after a fix to how the
+ *  leaf is built) WITHOUT regenerating the CA, so an imported CA stays valid. */
+#define LEAF_VERSION 4
+/** The name the CA's constraints permit (tls_dns_label of the hostname it was
+ *  made for): a leaf for any other is not one it may sign. */
+#define NVS_KEY_CA_NC "ca_nc"
+/** The hostname baked into the CA's subject when it was generated. The leaf's
+ *  issuer must match the CA subject exactly, and the CA is kept across hostname
+ *  changes, so the original name is remembered rather than rebuilt from the
+ *  current one. */
+#define NVS_KEY_CA_HOST "ca_host"
+/** The IPv4 address DHCP last gave the device, remembered so the leaf names it
+ *  from the next boot (see cert_ip_now). */
+#define NVS_KEY_IP4 "ip4"
+
+/* One NVS string tops out at 4000 bytes; keep each PEM comfortably under that.
+ * A leaf plus a couple of intermediates and a P-256 or RSA-2048 key fit easily -
+ * a longer chain is rejected with a hint rather than silently truncated. */
+#define BYO_PEM_MAX 3900
+
+/** Comfortably larger than a P-256 key and a small certificate. */
+#define KEY_PEM_MAX 512
+#define CERT_PEM_MAX 1536
+
+/*
+ * The device has no clock and no NTP, so it cannot know the date at generation
+ * time. A fixed, very wide validity window is the honest answer.
+ */
+#define VALID_FROM "20200101000000"
+#define VALID_TO "20500101000000"
+
+static void hostname_now(char *out, size_t len)
+{
+    tls_host_hostname(out, len);
+}
+
+/*
+ * The name baked into the CA subject: the hostname plus a short per-device suffix
+ * from the factory MAC. Two devices left on the default hostname would
+ * otherwise generate CAs with an IDENTICAL subject CN; a browser or OS trust store
+ * keys trust by name, so one device's imported CA then rejects the other's leaf as
+ * ERR_CERT_AUTHORITY_INVALID. The suffix makes each device's CA distinct. Both the
+ * CA subject and the stored ca_host use this, so the leaf issuer keeps matching.
+ */
+static void ca_hostname(char *out, size_t len)
+{
+    char host[40];
+    hostname_now(host, sizeof(host));
+    uint8_t mac[6] = {0};
+    (void)esp_efuse_mac_get_default(mac); /* factory base MAC, stable per device */
+    /* The precision keeps room for the suffix: it is what makes one
+     * device's CA distinct from another's, so a long hostname must lose
+     * its tail rather than push the MAC out of the buffer. */
+    const int room = (int)(len > 6 ? len - 6 : 0);
+    char suffix[8];
+    snprintf(suffix, sizeof(suffix), "-%02x%02x", mac[4], mac[5]);
+    const size_t hl = strlen(host);
+    /* NetworkDeck's default hostname (deck32-204c) carries the suffix already. */
+    if (hl >= 5 && strcasecmp(host + hl - 5, suffix) == 0) {
+        snprintf(out, len, "%s", host);
+        return;
+    }
+    snprintf(out, len, "%.*s%s", room, host, suffix);
+}
+
+/** Parse "a.b.c.d" into four bytes. False (and out untouched) if it is not one. */
+static bool parse_ip4(const char *s, uint8_t out[4])
+{
+    if (!s || !s[0]) {
+        return false;
+    }
+    int a, b, c, d, n = 0;
+    if (sscanf(s, "%d.%d.%d.%d%n", &a, &b, &c, &d, &n) != 4 || s[n] != '\0') {
+        return false;
+    }
+    if (a < 0 || a > 255 || b < 0 || b > 255 || c < 0 || c > 255 || d < 0 || d > 255) {
+        return false;
+    }
+    out[0] = (uint8_t)a;
+    out[1] = (uint8_t)b;
+    out[2] = (uint8_t)c;
+    out[3] = (uint8_t)d;
+    return true;
+}
+
+/*
+ * The address the leaf should also name, or "" for none: the static address, or
+ * the one DHCP last gave, and only when it is one the CA may vouch for.
+ */
+static void nvs_load_ip4(char *out, size_t len);
+
+static void cert_ip_now(char *out, size_t len)
+{
+    out[0] = '\0';
+    char candidate[16] = {0};
+    uint8_t ip[4];
+    char set[16] = {0};
+    if (tls_host_static_ip(set, sizeof(set))) {
+        if (parse_ip4(set, ip)) {
+            snprintf(candidate, sizeof(candidate), "%s", set);
+        }
+    } else {
+        /*
+         * On DHCP, the address the device was given last time.
+         *
+         * It used to name nothing here, on the grounds that a lease can move and
+         * naming it would churn the certificate. True - but it left the most common
+         * way anyone reaches the device, typing its IP address, permanently
+         * untrusted: the page can be clicked through, while the video stream cannot,
+         * because a browser refuses a wss:// upgrade to a mismatched certificate and
+         * offers no way to accept it. "Use the hostname instead" is not an answer
+         * when mDNS is exactly what does not work on plenty of networks.
+         *
+         * So the address is recorded when it arrives and named from the next
+         * restart. A lease that genuinely changes costs one re-issue on the
+         * following boot; a reserved or sticky lease - which is what a dock usually
+         * has - costs nothing after the first.
+         */
+        char stored[16] = {0};
+        nvs_load_ip4(stored, sizeof(stored));
+        if (parse_ip4(stored, ip)) {
+            snprintf(candidate, sizeof(candidate), "%s", stored);
+        }
+    }
+    if (!candidate[0] || !parse_ip4(candidate, ip)) {
+        return;
+    }
+    /* The CA may only vouch for private and link-local addresses, and a leaf that
+     * named another would be refused whole: the hostname then has to do. */
+    if (!tls_ip_in_scope(ip)) {
+        ESP_LOGW(TAG, "%s is not a private address: the certificate names the hostname only",
+                 candidate);
+        return;
+    }
+    snprintf(out, len, "%s", candidate);
+}
+
+/* ---- NVS ---------------------------------------------------------------- */
+
+static esp_err_t nvs_get_alloc(nvs_handle_t h, const char *key, char **out)
+{
+    size_t len = 0;
+    esp_err_t err = nvs_get_str(h, key, NULL, &len);
+    if (err != ESP_OK) {
+        return err;
+    }
+    char *buf = calloc(1, len);
+    if (!buf) {
+        return ESP_ERR_NO_MEM;
+    }
+    err = nvs_get_str(h, key, buf, &len);
+    if (err != ESP_OK) {
+        free(buf);
+        return err;
+    }
+    *out = buf;
+    return ESP_OK;
+}
+
+static esp_err_t nvs_load_ca(const char *label, char **cert, char **key, char *host,
+                             size_t host_len)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    /* An older CA layout (or the unversioned original) is treated as absent so
+     * the caller re-issues one in the current shape - a silent upgrade. */
+    uint8_t ver = 0;
+    if (nvs_get_u8(h, NVS_KEY_CA_VER, &ver) != ESP_OK || ver != CA_VERSION) {
+        nvs_close(h);
+        return ESP_ERR_INVALID_VERSION;
+    }
+    /* The CA vouches for one hostname's names (see the top of this file). A
+     * device that has been renamed since needs a CA for the new name. */
+    char permits[TLS_LABEL_MAX] = {0};
+    size_t plen = sizeof(permits);
+    if (nvs_get_str(h, NVS_KEY_CA_NC, permits, &plen) != ESP_OK ||
+        !tls_ca_covers(permits, label)) {
+        nvs_close(h);
+        ESP_LOGW(TAG, "the device authority is for '%s', not '%s': making a new one, which will "
+                      "have to be imported again",
+                 permits, label);
+        return ESP_ERR_INVALID_VERSION;
+    }
+    size_t hlen = host_len;
+    if (nvs_get_str(h, NVS_KEY_CA_HOST, host, &hlen) != ESP_OK) {
+        nvs_close(h);
+        return ESP_ERR_INVALID_VERSION; /* incomplete CA record; re-issue */
+    }
+    err = nvs_get_alloc(h, NVS_KEY_CA_CERT, cert);
+    if (err == ESP_OK) {
+        err = nvs_get_alloc(h, NVS_KEY_CA_KEY, key);
+        if (err != ESP_OK) {
+            free(*cert);
+            *cert = NULL;
+        }
+    }
+    nvs_close(h);
+    return err;
+}
+
+/** The stored leaf, if it was issued for @p name and @p ip under this layout. */
+static esp_err_t nvs_load_leaf(const char *name, const char *ip, char **cert, char **key)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    char stored[320] = {0}; /* longer than any id tls_leaf_id() builds */
+    size_t len = sizeof(stored);
+    err = nvs_get_str(h, NVS_KEY_NAME, stored, &len);
+    if (err != ESP_OK || !tls_leaf_current(stored, LEAF_VERSION, name, ip)) {
+        nvs_close(h);
+        return ESP_ERR_NOT_FOUND;
+    }
+    err = nvs_get_alloc(h, NVS_KEY_CERT, cert);
+    if (err == ESP_OK) {
+        err = nvs_get_alloc(h, NVS_KEY_KEY, key);
+        if (err != ESP_OK) {
+            free(*cert);
+            *cert = NULL;
+        }
+    }
+    nvs_close(h);
+    return err;
+}
+
+static esp_err_t nvs_store_ca(const char *cert, const char *key, const char *host,
+                              const char *label)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_str(h, NVS_KEY_CA_CERT, cert);
+    if (err == ESP_OK) {
+        err = nvs_set_str(h, NVS_KEY_CA_KEY, key);
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_str(h, NVS_KEY_CA_HOST, host);
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_str(h, NVS_KEY_CA_NC, label);
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_u8(h, NVS_KEY_CA_VER, CA_VERSION);
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    return err;
+}
+
+static esp_err_t nvs_store_leaf(const char *idkey, const char *cert, const char *key)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_set_str(h, NVS_KEY_CERT, cert);
+    if (err == ESP_OK) {
+        err = nvs_set_str(h, NVS_KEY_KEY, key);
+    }
+    if (err == ESP_OK) {
+        err = nvs_set_str(h, NVS_KEY_NAME, idkey);
+    }
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    return err;
+}
+
+/* ---- key and certificate generation ------------------------------------ */
+
+/**
+ * Generate an ECDSA P-256 key: populate @p key (caller frees) and write its PEM
+ * to @p pem. P-256 rather than RSA because this happens on the device, where an
+ * RSA-2048 key would take tens of seconds.
+ */
+static esp_err_t gen_key(mbedtls_pk_context *key, char *pem, size_t pem_len)
+{
+    if (psa_crypto_init() != PSA_SUCCESS) {
+        return ESP_FAIL;
+    }
+    mbedtls_svc_key_id_t key_id = MBEDTLS_SVC_KEY_ID_INIT;
+    psa_key_attributes_t attr = PSA_KEY_ATTRIBUTES_INIT;
+    psa_set_key_type(&attr, PSA_KEY_TYPE_ECC_KEY_PAIR(PSA_ECC_FAMILY_SECP_R1));
+    psa_set_key_bits(&attr, 256);
+    psa_set_key_algorithm(&attr, PSA_ALG_ECDSA(PSA_ALG_SHA_256));
+    psa_set_key_usage_flags(&attr, PSA_KEY_USAGE_SIGN_HASH | PSA_KEY_USAGE_SIGN_MESSAGE |
+                                       PSA_KEY_USAGE_EXPORT);
+    if (psa_generate_key(&attr, &key_id) != PSA_SUCCESS) {
+        return ESP_FAIL;
+    }
+    esp_err_t res = ESP_FAIL;
+    if (mbedtls_pk_copy_from_psa(key_id, key) == 0 &&
+        mbedtls_pk_write_key_pem(key, (unsigned char *)pem, pem_len) == 0) {
+        res = ESP_OK;
+    }
+    /* The pk is independent of the PSA key now, so it is safe to drop it here
+     * and still sign with the pk afterwards. */
+    (void)psa_destroy_key(key_id);
+    return res;
+}
+
+static void random_serial(unsigned char serial[16])
+{
+    esp_fill_random(serial, 16);
+    /* The serial is written as a raw DER INTEGER. The leading byte must be
+     * 0x01..0x7f: clearing the top bit keeps it positive, and forcing it non-zero
+     * avoids a redundant leading 0x00, which parsers reject as "illegal padding"
+     * (a self-inflicted broken certificate roughly 1 serial in 256). */
+    serial[0] &= 0x7f;
+    if (serial[0] == 0x00) {
+        serial[0] = 0x01;
+    }
+}
+
+/**
+ * Generate the root CA: self-signed, marked as a CA so it can be a trust anchor,
+ * for certificate signing only, and constrained to the names of the device
+ * called @p label (see the top of this file).
+ */
+static esp_err_t gen_ca(const char *label, char **cert_out, char **key_out)
+{
+    esp_err_t res = ESP_FAIL;
+    mbedtls_pk_context key;
+    mbedtls_x509write_cert crt;
+    mbedtls_pk_init(&key);
+    mbedtls_x509write_crt_init(&crt);
+    char *key_pem = calloc(1, KEY_PEM_MAX);
+    char *cert_pem = calloc(1, CERT_PEM_MAX);
+    if (!key_pem || !cert_pem) {
+        res = ESP_ERR_NO_MEM;
+        goto done;
+    }
+    if (gen_key(&key, key_pem, KEY_PEM_MAX) != ESP_OK) {
+        goto done;
+    }
+
+    /* Name the CA after the device (hostname + MAC suffix) so it is recognisable
+     * once imported and unique across devices. */
+    char host[40];
+    ca_hostname(host, sizeof(host));
+    char ca_subject[TLS_NAME_MAX];
+    tls_ca_subject(ca_subject, sizeof(ca_subject), host);
+
+    uint8_t constraints[256];
+    const size_t constraints_len = tls_name_constraints(constraints, sizeof(constraints), label);
+    if (constraints_len == 0) {
+        ESP_LOGE(TAG, "no name constraints could be made for '%s'", label);
+        goto done;
+    }
+
+    unsigned char serial[16];
+    random_serial(serial);
+    mbedtls_x509write_crt_set_version(&crt, MBEDTLS_X509_CRT_VERSION_3);
+    mbedtls_x509write_crt_set_md_alg(&crt, MBEDTLS_MD_SHA256);
+    mbedtls_x509write_crt_set_subject_key(&crt, &key);
+    mbedtls_x509write_crt_set_issuer_key(&crt, &key);
+    if (mbedtls_x509write_crt_set_subject_name(&crt, ca_subject) != 0 ||
+        mbedtls_x509write_crt_set_issuer_name(&crt, ca_subject) != 0 ||
+        mbedtls_x509write_crt_set_serial_raw(&crt, serial, sizeof(serial)) != 0 ||
+        mbedtls_x509write_crt_set_validity(&crt, VALID_FROM, VALID_TO) != 0 ||
+        mbedtls_x509write_crt_set_basic_constraints(&crt, 1, 0) != 0 ||
+        mbedtls_x509write_crt_set_key_usage(&crt, MBEDTLS_X509_KU_KEY_CERT_SIGN |
+                                                      MBEDTLS_X509_KU_CRL_SIGN) != 0 ||
+        /* Critical, as RFC 5280 asks of a CA that constrains: a client that does
+         * not understand it must refuse the CA rather than trust it wider than
+         * it was meant. */
+        mbedtls_x509write_crt_set_extension(&crt, MBEDTLS_OID_NAME_CONSTRAINTS,
+                                            MBEDTLS_OID_SIZE(MBEDTLS_OID_NAME_CONSTRAINTS), 1,
+                                            constraints, constraints_len) != 0 ||
+        mbedtls_x509write_crt_set_subject_key_identifier(&crt) != 0 ||
+        mbedtls_x509write_crt_set_authority_key_identifier(&crt) != 0) {
+        ESP_LOGE(TAG, "CA fields rejected");
+        goto done;
+    }
+    int written = mbedtls_x509write_crt_pem(&crt, (unsigned char *)cert_pem, CERT_PEM_MAX);
+    if (written != 0) {
+        ESP_LOGE(TAG, "CA PEM write failed (-0x%04x)", -written);
+        goto done;
+    }
+    *cert_out = cert_pem;
+    *key_out = key_pem;
+    cert_pem = NULL;
+    key_pem = NULL;
+    res = ESP_OK;
+
+done:
+    free(cert_pem);
+    free(key_pem);
+    mbedtls_x509write_crt_free(&crt);
+    mbedtls_pk_free(&key);
+    return res;
+}
+
+/** Generate a server (leaf) certificate signed by the CA, naming @p name and,
+ *  if given, @p ip in its SANs. */
+static esp_err_t gen_leaf(const char *ca_key_pem, const char *name, const char *ip,
+                          const char *ca_host, char **cert_out, char **key_out)
+{
+    esp_err_t res = ESP_FAIL;
+    mbedtls_pk_context ca_key;
+    mbedtls_pk_context key;
+    mbedtls_x509write_cert crt;
+    mbedtls_pk_init(&ca_key);
+    mbedtls_pk_init(&key);
+    mbedtls_x509write_crt_init(&crt);
+    char *key_pem = calloc(1, KEY_PEM_MAX);
+    char *cert_pem = calloc(1, CERT_PEM_MAX);
+    if (!key_pem || !cert_pem) {
+        res = ESP_ERR_NO_MEM;
+        goto done;
+    }
+    if (mbedtls_pk_parse_key(&ca_key, (const unsigned char *)ca_key_pem, strlen(ca_key_pem) + 1,
+                             NULL, 0) != 0) {
+        ESP_LOGE(TAG, "CA key could not be parsed");
+        goto done;
+    }
+    if (gen_key(&key, key_pem, KEY_PEM_MAX) != ESP_OK) {
+        goto done;
+    }
+
+    char subject[TLS_NAME_MAX];
+    char san_local[TLS_LABEL_MAX + 8];
+    tls_leaf_subject(subject, sizeof(subject), name);
+    snprintf(san_local, sizeof(san_local), "%s.local", name);
+
+    uint8_t ip_bytes[4];
+    const bool have_ip = parse_ip4(ip, ip_bytes);
+
+    /* Browsers reject a certificate with no subjectAltName. The bare hostname,
+     * the mDNS name and (for a static address) the IP are all listed. IP SANs
+     * carry the raw four bytes, not text. */
+    mbedtls_x509_san_list san_host = {
+        .node = {.type = MBEDTLS_X509_SAN_DNS_NAME,
+                 .san = {.unstructured_name = {.p = (unsigned char *)name, .len = strlen(name)}}},
+        .next = NULL,
+    };
+    mbedtls_x509_san_list san_mdns = {
+        .node = {.type = MBEDTLS_X509_SAN_DNS_NAME,
+                 .san = {.unstructured_name = {.p = (unsigned char *)san_local,
+                                               .len = strlen(san_local)}}},
+        .next = &san_host,
+    };
+    mbedtls_x509_san_list san_ip = {
+        .node = {.type = MBEDTLS_X509_SAN_IP_ADDRESS,
+                 .san = {.unstructured_name = {.p = ip_bytes, .len = sizeof(ip_bytes)}}},
+        .next = &san_mdns,
+    };
+    mbedtls_x509_san_list *san_head = have_ip ? &san_ip : &san_mdns;
+
+    /* extendedKeyUsage = serverAuth; Chrome requires it on the leaf when the
+     * chain is validated against a privately-imported CA. */
+    mbedtls_asn1_sequence eku = {
+        .buf = {.tag = MBEDTLS_ASN1_OID,
+                .p = (unsigned char *)MBEDTLS_OID_SERVER_AUTH,
+                .len = MBEDTLS_OID_SIZE(MBEDTLS_OID_SERVER_AUTH)},
+        .next = NULL,
+    };
+
+    unsigned char serial[16];
+    random_serial(serial);
+    mbedtls_x509write_crt_set_version(&crt, MBEDTLS_X509_CRT_VERSION_3);
+    mbedtls_x509write_crt_set_md_alg(&crt, MBEDTLS_MD_SHA256);
+    mbedtls_x509write_crt_set_subject_key(&crt, &key);
+    mbedtls_x509write_crt_set_issuer_key(&crt, &ca_key);
+    char issuer[TLS_NAME_MAX];
+    tls_ca_subject(issuer, sizeof(issuer), ca_host);
+    if (mbedtls_x509write_crt_set_subject_name(&crt, subject) != 0 ||
+        mbedtls_x509write_crt_set_issuer_name(&crt, issuer) != 0 ||
+        mbedtls_x509write_crt_set_serial_raw(&crt, serial, sizeof(serial)) != 0 ||
+        mbedtls_x509write_crt_set_validity(&crt, VALID_FROM, VALID_TO) != 0 ||
+        mbedtls_x509write_crt_set_basic_constraints(&crt, 0, -1) != 0 ||
+        /* An ECDSA key signs the handshake; keyAgreement is for a static
+         * Diffie-Hellman key, which this is not. */
+        mbedtls_x509write_crt_set_key_usage(&crt, MBEDTLS_X509_KU_DIGITAL_SIGNATURE) != 0 ||
+        mbedtls_x509write_crt_set_ext_key_usage(&crt, &eku) != 0 ||
+        mbedtls_x509write_crt_set_subject_alternative_name(&crt, san_head) != 0 ||
+        mbedtls_x509write_crt_set_subject_key_identifier(&crt) != 0 ||
+        mbedtls_x509write_crt_set_authority_key_identifier(&crt) != 0) {
+        ESP_LOGE(TAG, "leaf fields rejected");
+        goto done;
+    }
+    int written = mbedtls_x509write_crt_pem(&crt, (unsigned char *)cert_pem, CERT_PEM_MAX);
+    if (written != 0) {
+        ESP_LOGE(TAG, "leaf PEM write failed (-0x%04x)", -written);
+        goto done;
+    }
+    *cert_out = cert_pem;
+    *key_out = key_pem;
+    cert_pem = NULL;
+    key_pem = NULL;
+    res = ESP_OK;
+
+done:
+    free(cert_pem);
+    free(key_pem);
+    mbedtls_x509write_crt_free(&crt);
+    mbedtls_pk_free(&key);
+    mbedtls_pk_free(&ca_key);
+    return res;
+}
+
+/*
+ * Key generation and certificate writing need something like ten kilobytes of
+ * stack - far more than app_main has - so the work runs on a task made for it
+ * and thrown away afterwards.
+ */
+enum { JOB_CA, JOB_LEAF };
+typedef struct {
+    int kind;
+    const char *label;      /* JOB_CA: the name its constraints permit */
+    const char *ca_key_pem; /* JOB_LEAF */
+    const char *name;       /* JOB_LEAF */
+    const char *ip;         /* JOB_LEAF */
+    const char *ca_host;    /* JOB_LEAF: CA's own hostname, for the issuer */
+    char *cert;             /* out */
+    char *key;              /* out */
+    esp_err_t result;
+    SemaphoreHandle_t done;
+} gen_job_t;
+
+static void gen_task(void *arg)
+{
+    gen_job_t *job = (gen_job_t *)arg;
+    job->result = (job->kind == JOB_CA)
+                      ? gen_ca(job->label, &job->cert, &job->key)
+                      : gen_leaf(job->ca_key_pem, job->name, job->ip, job->ca_host, &job->cert,
+                                 &job->key);
+    xSemaphoreGive(job->done);
+    vTaskDelete(NULL);
+}
+
+static esp_err_t run_gen(gen_job_t *job)
+{
+    job->done = xSemaphoreCreateBinary();
+    if (!job->done) {
+        return ESP_ERR_NO_MEM;
+    }
+    if (xTaskCreate(gen_task, "tls_gen", 12 * 1024, job, 5, NULL) != pdPASS) {
+        vSemaphoreDelete(job->done);
+        return ESP_ERR_NO_MEM;
+    }
+    xSemaphoreTake(job->done, portMAX_DELAY);
+    vSemaphoreDelete(job->done);
+    return job->result;
+}
+
+/* ---- operator-supplied certificate (bring your own) --------------------- */
+
+/*
+ * Confirm the certificate and key parse and that the key belongs to the
+ * certificate. Parsing wants several kilobytes of stack - more than an HTTP
+ * handler has - so, like generation, it runs on a task of its own.
+ */
+/*
+ * Does this key sign what that certificate verifies?
+ *
+ * mbedtls_pk_check_pair() compares the public key each context carries, and an
+ * RSA key read from a PKCS#8 PEM ("BEGIN PRIVATE KEY", which is what a current
+ * openssl writes) carries none in mbedTLS 4.1 - only the PKCS#1 form ("BEGIN RSA
+ * PRIVATE KEY") fills it in. So the same key is accepted in one encoding and
+ * refused in the other. Signing something and verifying it with the certificate
+ * asks the real question instead, whatever the encoding was.
+ */
+static bool signs_for(mbedtls_pk_context *key, mbedtls_pk_context *cert_pk)
+{
+    unsigned char hash[32];
+    memset(hash, 0x5a, sizeof(hash));
+    unsigned char sig[MBEDTLS_PK_SIGNATURE_MAX_SIZE];
+    size_t sig_len = 0;
+    if (mbedtls_pk_sign(key, MBEDTLS_MD_SHA256, hash, sizeof(hash), sig, sizeof(sig), &sig_len) != 0) {
+        return false;
+    }
+    return mbedtls_pk_verify(cert_pk, MBEDTLS_MD_SHA256, hash, sizeof(hash), sig, sig_len) == 0;
+}
+
+/*
+ * The key as mbedTLS writes it: PKCS#1 for RSA, SEC1 for EC. What goes into
+ * storage, whatever the operator sent - see signs_for() for why the encoding
+ * matters here.
+ */
+static char *key_as_pem(mbedtls_pk_context *key)
+{
+    enum { BYO_KEY_PEM_MAX = 4096 };
+    char *out = calloc(1, BYO_KEY_PEM_MAX);
+    if (!out) {
+        return NULL;
+    }
+    if (mbedtls_pk_write_key_pem(key, (unsigned char *)out, BYO_KEY_PEM_MAX) != 0) {
+        free(out);
+        return NULL;
+    }
+    return out;
+}
+
+/*
+ * @p normalised, when not NULL, receives the key re-encoded the way the TLS
+ * stack reads it - the caller frees it.
+ */
+static esp_err_t validate_pair(const char *cert_pem, const char *key_pem, char *err, size_t errlen,
+                               char **normalised)
+{
+    mbedtls_x509_crt crt;
+    mbedtls_pk_context key;
+    mbedtls_x509_crt_init(&crt);
+    mbedtls_pk_init(&key);
+    esp_err_t res = ESP_ERR_INVALID_ARG;
+
+    if (mbedtls_x509_crt_parse(&crt, (const unsigned char *)cert_pem, strlen(cert_pem) + 1) != 0) {
+        snprintf(err, errlen, "the certificate could not be parsed (is it PEM?)");
+        goto done;
+    }
+    int rc = mbedtls_pk_parse_key(&key, (const unsigned char *)key_pem, strlen(key_pem) + 1, NULL, 0);
+    if (rc != 0) {
+        snprintf(err, errlen, "the private key could not be parsed (an unencrypted PEM key?) [-0x%04x]",
+                 (unsigned)-rc);
+        goto done;
+    }
+    rc = mbedtls_pk_check_pair(&crt.pk, &key);
+    if (rc != 0 && !signs_for(&key, &crt.pk)) {
+        /* The code is worth showing: a pair that really does not match and a
+         * library that refuses the key for another reason read the same
+         * otherwise. */
+        snprintf(err, errlen, "the private key does not match the certificate [-0x%04x, %u bits]",
+                 (unsigned)-rc, (unsigned)mbedtls_pk_get_bitlen(&key));
+        ESP_LOGW(TAG, "check_pair: -0x%04x; cert %u bits, key %u bits", (unsigned)-rc,
+                 (unsigned)mbedtls_pk_get_bitlen(&crt.pk), (unsigned)mbedtls_pk_get_bitlen(&key));
+        goto done;
+    }
+    if (normalised) {
+        *normalised = key_as_pem(&key);
+        if (!*normalised) {
+            snprintf(err, errlen, "out of memory rewriting the private key");
+            goto done;
+        }
+    }
+    res = ESP_OK;
+done:
+    mbedtls_pk_free(&key);
+    mbedtls_x509_crt_free(&crt);
+    return res;
+}
+
+typedef struct {
+    const char *cert;
+    const char *key;
+    char *err;
+    size_t errlen;
+    char **normalised;
+    esp_err_t result;
+    SemaphoreHandle_t done;
+} byo_job_t;
+
+static void byo_validate_task(void *arg)
+{
+    byo_job_t *job = (byo_job_t *)arg;
+    job->result = validate_pair(job->cert, job->key, job->err, job->errlen, job->normalised);
+    xSemaphoreGive(job->done);
+    vTaskDelete(NULL);
+}
+
+static esp_err_t run_validate(const char *cert, const char *key, char *err, size_t errlen,
+                              char **normalised)
+{
+    byo_job_t job = {.cert = cert, .key = key, .err = err, .errlen = errlen,
+                     .normalised = normalised, .result = ESP_FAIL};
+    job.done = xSemaphoreCreateBinary();
+    if (!job.done) {
+        return ESP_ERR_NO_MEM;
+    }
+    if (xTaskCreate(byo_validate_task, "tls_byo", 12 * 1024, &job, 5, NULL) != pdPASS) {
+        vSemaphoreDelete(job.done);
+        return ESP_ERR_NO_MEM;
+    }
+    xSemaphoreTake(job.done, portMAX_DELAY);
+    vSemaphoreDelete(job.done);
+    return job.result;
+}
+
+static esp_err_t nvs_load_byo(char **cert, char **key)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READONLY, &h);
+    if (err != ESP_OK) {
+        return err;
+    }
+    err = nvs_get_alloc(h, NVS_KEY_BYO_CERT, cert);
+    if (err == ESP_OK) {
+        err = nvs_get_alloc(h, NVS_KEY_BYO_KEY, key);
+        if (err != ESP_OK) {
+            free(*cert);
+            *cert = NULL;
+        }
+    }
+    nvs_close(h);
+    return err;
+}
+
+esp_err_t tls_byo_set(const char *cert_pem, const char *key_pem, char *err, size_t errlen)
+{
+    if (err && errlen) {
+        err[0] = '\0';
+    }
+    if (!cert_pem || !key_pem || !cert_pem[0] || !key_pem[0]) {
+        if (err) {
+            snprintf(err, errlen, "both a certificate and a private key are required");
+        }
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (strlen(cert_pem) >= BYO_PEM_MAX || strlen(key_pem) >= BYO_PEM_MAX) {
+        if (err) {
+            snprintf(err, errlen,
+                     "certificate or key too large; include only the leaf and any intermediates");
+        }
+        return ESP_ERR_INVALID_SIZE;
+    }
+
+    char reason[128] = {0};
+    char *key_store = NULL;
+    esp_err_t vr = run_validate(cert_pem, key_pem, reason, sizeof(reason), &key_store);
+    if (vr != ESP_OK) {
+        if (err) {
+            snprintf(err, errlen, "%s", reason[0] ? reason : "the certificate could not be validated");
+        }
+        return vr;
+    }
+    /* Stored as mbedTLS writes it, not as it arrived: see signs_for(). */
+    const char *key_to_store = key_store ? key_store : key_pem;
+
+    nvs_handle_t h;
+    esp_err_t e = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (e != ESP_OK) {
+        if (err) {
+            snprintf(err, errlen, "storage unavailable (%s)", esp_err_to_name(e));
+        }
+        return e;
+    }
+    e = nvs_set_str(h, NVS_KEY_BYO_CERT, cert_pem);
+    if (e == ESP_OK) {
+        e = nvs_set_str(h, NVS_KEY_BYO_KEY, key_to_store);
+    }
+    if (e == ESP_OK) {
+        e = nvs_commit(h);
+    }
+    nvs_close(h);
+    free(key_store);
+    if (e != ESP_OK && err) {
+        if (e == ESP_ERR_NVS_NOT_ENOUGH_SPACE) {
+            /* Settings live in a 24 KB NVS partition, and a 4096-bit RSA pair in
+             * PEM is over 5 KB of it. Say so, and say what does fit - moving the
+             * partition would need a serial flash on every device out there. */
+            nvs_stats_t st = {0};
+            (void)nvs_get_stats(NULL, &st);
+            snprintf(err, errlen,
+                     "no room left in the device's settings storage for a key this size "
+                     "(%u of %u entries free). An EC (P-256) key or RSA 2048 fits.",
+                     (unsigned)st.free_entries, (unsigned)st.total_entries);
+        } else {
+            snprintf(err, errlen, "could not be stored (%s)", esp_err_to_name(e));
+        }
+    }
+    return e;
+}
+
+esp_err_t tls_byo_clear(void)
+{
+    nvs_handle_t h;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h);
+    if (err != ESP_OK) {
+        return (err == ESP_ERR_NVS_NOT_FOUND) ? ESP_OK : err;
+    }
+    (void)nvs_erase_key(h, NVS_KEY_BYO_CERT);
+    (void)nvs_erase_key(h, NVS_KEY_BYO_KEY);
+    err = nvs_commit(h);
+    nvs_close(h);
+    return err;
+}
+
+bool tls_byo_present(void)
+{
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+        return false;
+    }
+    size_t len = 0;
+    const bool present = nvs_get_str(h, NVS_KEY_BYO_CERT, NULL, &len) == ESP_OK && len > 1;
+    nvs_close(h);
+    return present;
+}
+
+static void nvs_load_ip4(char *out, size_t len)
+{
+    if (!out || !len) {
+        return;
+    }
+    out[0] = '\0';
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READONLY, &h) != ESP_OK) {
+        return;
+    }
+    size_t l = len;
+    nvs_get_str(h, NVS_KEY_IP4, out, &l);
+    nvs_close(h);
+}
+
+bool tls_set_ip4(const char *ip)
+{
+    if (!ip) {
+        ip = "";
+    }
+    /* A static address is already named from the setting, and is what the leaf
+     * uses; recording the lease as well would only re-issue the certificate for
+     * an address it does not name. */
+    char static_ip[16];
+    if (tls_host_static_ip(static_ip, sizeof(static_ip))) {
+        return false;
+    }
+    char cur[16] = {0};
+    nvs_load_ip4(cur, sizeof(cur));
+    if (strcmp(cur, ip) == 0) {
+        return false; /* unchanged - the served leaf already names it */
+    }
+    nvs_handle_t h;
+    if (nvs_open(NVS_NAMESPACE, NVS_READWRITE, &h) != ESP_OK) {
+        return false;
+    }
+    esp_err_t err = nvs_set_str(h, NVS_KEY_IP4, ip);
+    if (err == ESP_OK) {
+        err = nvs_commit(h);
+    }
+    nvs_close(h);
+    if (err != ESP_OK) {
+        return false;
+    }
+    ESP_LOGI(TAG, "IPv4 address recorded for the certificate: %s", ip[0] ? ip : "(none)");
+    return true;
+}
+
+esp_err_t tls_identity_get(tls_identity_t *out, bool allow_byo)
+{
+    if (!out) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    memset(out, 0, sizeof(*out));
+
+    /*
+     * The operator's own certificate takes precedence when one is installed:
+     * served as-is (it may be a chain), with no CA to import since whatever
+     * issued it is trusted elsewhere. It was validated when uploaded; if the TLS
+     * stack still rejects it at start-up the web server retries with allow_byo
+     * false, so this can never strand the console.
+     */
+    if (allow_byo) {
+        char *byo_cert = NULL;
+        char *byo_key = NULL;
+        char why[128] = {0};
+        if (nvs_load_byo(&byo_cert, &byo_key) == ESP_OK &&
+            run_validate(byo_cert, byo_key, why, sizeof(why), NULL) != ESP_OK) {
+            /* Stored once, useless now - written by an older firmware, or the
+             * storage is damaged. The console must still come up, so it does,
+             * with the device's own certificate. */
+            ESP_LOGE(TAG, "the stored certificate cannot be used (%s); serving the device's own", why);
+            free(byo_cert);
+            free(byo_key);
+            byo_cert = NULL;
+            byo_key = NULL;
+        }
+        if (byo_cert && byo_key) {
+            out->cert_pem = byo_cert;
+            out->cert_len = strlen(byo_cert) + 1;
+            out->key_pem = byo_key;
+            out->key_len = strlen(byo_key) + 1;
+            out->byo = true;
+            ESP_LOGI(TAG, "serving the operator-supplied certificate");
+            return ESP_OK;
+        }
+    }
+
+    /* What the certificates call the device: its hostname as a plain lower-case
+     * name (the CA's constraints and the leaf's names are this, and no other). */
+    char host[40];
+    hostname_now(host, sizeof(host));
+    char name[TLS_LABEL_MAX];
+    tls_dns_label(name, sizeof(name), host);
+    char ip[16];
+    cert_ip_now(ip, sizeof(ip));
+    char idkey[TLS_NAME_MAX];
+    tls_leaf_id(idkey, sizeof(idkey), LEAF_VERSION, name, ip);
+
+    /* The CA: generated once and kept, so importing it is a one-time act. Its
+     * subject carries the hostname it was born with; remember that so the leaf's
+     * issuer keeps matching even after a later rename. */
+    char *ca_cert = NULL;
+    char *ca_key = NULL;
+    char ca_host[40] = {0};
+    bool fresh_ca = false;
+    if (nvs_load_ca(name, &ca_cert, &ca_key, ca_host, sizeof(ca_host)) != ESP_OK) {
+        const int64_t started = esp_log_timestamp();
+        gen_job_t job = {.kind = JOB_CA, .label = name};
+        esp_err_t err = run_gen(&job);
+        if (err != ESP_OK) {
+            return err;
+        }
+        ca_cert = job.cert;
+        ca_key = job.key;
+        fresh_ca = true;
+        /* gen_ca names the CA with ca_hostname() (hostname + MAC suffix); store the
+         * same value so the leaf's issuer keeps matching the CA subject exactly. */
+        ca_hostname(ca_host, sizeof(ca_host));
+        if (nvs_store_ca(ca_cert, ca_key, ca_host, name) != ESP_OK) {
+            ESP_LOGW(TAG, "CA not stored; it will be regenerated next boot");
+        }
+        ESP_LOGW(TAG, "generated a device CA in %lld ms: a browser has to import it again "
+                      "(/cert.pem), and may drop an older one",
+                 (long long)(esp_log_timestamp() - started));
+    }
+
+    /*
+     * The leaf: re-issued when the hostname or static IP changes - and always
+     * when the CA is new, since any stored leaf was signed by a different (or no)
+     * CA and would not chain to this one. That is also the upgrade path from the
+     * old self-signed-leaf builds.
+     */
+    char *leaf_cert = NULL;
+    char *leaf_key = NULL;
+    if (fresh_ca || nvs_load_leaf(name, ip, &leaf_cert, &leaf_key) != ESP_OK) {
+        gen_job_t job = {.kind = JOB_LEAF,
+                         .ca_key_pem = ca_key,
+                         .name = name,
+                         .ip = ip,
+                         .ca_host = ca_host};
+        esp_err_t err = run_gen(&job);
+        if (err != ESP_OK) {
+            free(ca_cert);
+            free(ca_key);
+            return err;
+        }
+        leaf_cert = job.cert;
+        leaf_key = job.key;
+        if (nvs_store_leaf(idkey, leaf_cert, leaf_key) != ESP_OK) {
+            ESP_LOGW(TAG, "certificate not stored; it will be regenerated next boot");
+        }
+        ESP_LOGI(TAG, "issued a certificate for %s.local%s%s", name, ip[0] ? " / " : "", ip);
+    } else {
+        ESP_LOGI(TAG, "certificate for %s.local loaded", name);
+    }
+
+    /* Serve the leaf alone. The CA's name constraints are a critical extension,
+     * which mbedTLS cannot parse: a chain that carried the CA would not load into
+     * the TLS server, and the device would fall back to plain HTTP. A client that
+     * trusts the CA has it already. */
+    out->cert_pem = leaf_cert; /* ownership transferred */
+    out->cert_len = strlen(leaf_cert) + 1;
+    out->key_pem = leaf_key;   /* ownership transferred */
+    out->key_len = strlen(leaf_key) + 1;
+    out->ca_pem = ca_cert;     /* ownership transferred; this is what to import */
+    out->ca_len = strlen(ca_cert) + 1;
+
+    free(ca_key);
+    return ESP_OK;
+}
+
+void tls_identity_free(tls_identity_t *id)
+{
+    if (!id) {
+        return;
+    }
+    free(id->cert_pem);
+    free(id->key_pem);
+    free(id->ca_pem);
+    memset(id, 0, sizeof(*id));
+}
+
+esp_err_t tls_identity_reset(void)
+{
+    nvs_handle_t nvs;
+    esp_err_t err = nvs_open(NVS_NAMESPACE, NVS_READWRITE, &nvs);
+    if (err != ESP_OK) {
+        return err;
+    }
+    (void)nvs_erase_all(nvs);
+    err = nvs_commit(nvs);
+    nvs_close(nvs);
+    return err;
+}

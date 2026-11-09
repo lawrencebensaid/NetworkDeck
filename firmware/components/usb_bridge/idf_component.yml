@@ -2,5 +2,7 @@ dependencies:
   espressif/usb:
     version: "^1.6.0"
     # Vendored 1.6.0 with fixes for high-speed interrupt OUT on the P4 (espressif/esp-idf#14412).
-    # See vendor/usb/DECK32_PATCH.md.
+    # See vendor/usb/DECK32_PATCH.md. Only chips with a USB OTG controller.
     override_path: "../../vendor/usb"
+    rules:
+      - if: "target in [esp32p4, esp32s3, esp32s2]"
