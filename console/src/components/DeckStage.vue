@@ -136,8 +136,8 @@ const caption = computed(() => {
     aria-label="Stream Deck"
     data-testid="stage"
   >
-    <div class="absolute top-4 left-1/2 z-10 -translate-x-1/2"><AppPill /></div>
     <template v-if="deck?.attached">
+      <div class="mb-4 flex h-7 items-end justify-center"><AppPill /></div>
       <div
         class="body"
         :data-finish="finish"

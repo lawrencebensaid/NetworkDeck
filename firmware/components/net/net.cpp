@@ -453,7 +453,7 @@ esp_err_t start(const std::string& name, std::function<void(const Status&)> on_c
     err = start_ethernet();
     if (err == ESP_ERR_NOT_SUPPORTED) ESP_LOGI(TAG, "no Ethernet on this chip");
     else if (err != ESP_OK) ESP_LOGE(TAG, "Ethernet failed: %s", esp_err_to_name(err));
-    xTaskCreatePinnedToCore(task, "net", 6144, nullptr, 6, &g_task, 1);
+    xTaskCreatePinnedToCore(task, "net", 6144, nullptr, 6, &g_task, portNUM_PROCESSORS - 1);
     return ESP_OK;
 }
 

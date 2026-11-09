@@ -214,7 +214,7 @@ void start(const Callbacks& cb) {
     g_events = xQueueCreate(8, sizeof(UiEvent));
     g_answer = xSemaphoreCreateBinary();
     g_confirm_lock = xSemaphoreCreateMutex();
-    xTaskCreatePinnedToCore(task, "deck_ui", 16384, nullptr, 5, &g_task, 1);
+    xTaskCreatePinnedToCore(task, "deck_ui", 16384, nullptr, 5, &g_task, portNUM_PROCESSORS - 1);
 }
 
 void deck_attached(uint16_t pid) {

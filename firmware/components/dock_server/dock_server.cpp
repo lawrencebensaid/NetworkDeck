@@ -274,7 +274,7 @@ void listener_task(void* arg) {
         }
         if (host_new && g_config.on_host_change) g_config.on_host_change(true);
         if (xTaskCreatePinnedToCore(conn_task, port == cora::Port::Dock ? "dock_conn" : "deck_conn", 6144, c, 8,
-                                    nullptr, 1) != pdPASS) {
+                                    nullptr, portNUM_PROCESSORS - 1) != pdPASS) {
             ESP_LOGE(TAG, "no memory for connection task");
             std::lock_guard<std::mutex> lock(g_mutex);
             if (g_slot.dock == c) g_slot.dock = nullptr;
@@ -293,8 +293,8 @@ void send_plug_event_locked() {
 
 void start(const Config& config) {
     g_config = config;
-    xTaskCreatePinnedToCore(listener_task, "dock_listen", 4096, reinterpret_cast<void*>(cora::Port::Dock), 7, nullptr, 1);
-    xTaskCreatePinnedToCore(listener_task, "deck_listen", 4096, reinterpret_cast<void*>(cora::Port::Child), 7, nullptr, 1);
+    xTaskCreatePinnedToCore(listener_task, "dock_listen", 4096, reinterpret_cast<void*>(cora::Port::Dock), 7, nullptr, portNUM_PROCESSORS - 1);
+    xTaskCreatePinnedToCore(listener_task, "deck_listen", 4096, reinterpret_cast<void*>(cora::Port::Child), 7, nullptr, portNUM_PROCESSORS - 1);
 }
 
 bool host_connected() {

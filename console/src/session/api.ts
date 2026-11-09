@@ -104,6 +104,7 @@ export interface SystemInfo {
   led_gpio: number;
   default_led_gpio: number;
   usb_power_gpio: number;
+  usb_data_pins: string; /* the chip's fixed USB data pins, in words; empty without USB host */
 }
 
 export interface ApiKeyInfo {

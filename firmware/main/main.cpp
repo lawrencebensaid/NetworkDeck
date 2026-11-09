@@ -165,7 +165,7 @@ std::string system_json() {
     psram = esp_psram_get_size();
 #endif
     const auto sys = settings::system();
-    char b[1024];
+    char b[1152];
     std::snprintf(
         b, sizeof(b),
         "{\"chip\":\"%s\",\"revision\":\"v%d.%d\",\"cores\":%d,\"cpu_mhz\":%d,\"flash_bytes\":%u,\"psram_bytes\":%u,"
@@ -173,7 +173,7 @@ std::string system_json() {
         "\"serial\":\"%s\",\"mac_base\":\"%s\",\"mac_ethernet\":\"%s\",\"mac_wifi\":\"%s\","
         "\"idf\":\"%s\",\"firmware\":\"%s\",\"partition\":\"%s\",\"uptime\":%u,\"reset_reason\":\"%s\","
         "\"heap_free\":%u,\"heap_min\":%u,\"heap_total\":%u,\"psram_free\":%u,\"temp_c\":%.1f,\"warm_c\":%.0f,\"hot_c\":%.0f,"
-        "\"led\":%s,\"led_gpio\":%d,\"default_led_gpio\":%d,\"usb_power_gpio\":%d}",
+        "\"led\":%s,\"led_gpio\":%d,\"default_led_gpio\":%d,\"usb_power_gpio\":%d,\"usb_data_pins\":\"%s\"}",
         net::chip_name(), chip.revision / 100, chip.revision % 100, chip.cores, CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ,
         static_cast<unsigned>(flash), static_cast<unsigned>(psram),
 #if CONFIG_IDF_TARGET_ESP32P4
@@ -195,7 +195,16 @@ std::string system_json() {
         static_cast<unsigned>(heap_caps_get_total_size(MALLOC_CAP_INTERNAL)),
         static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)), static_cast<double>(g_temp),
         static_cast<double>(kWarmC), static_cast<double>(kHotC), sys.led ? "true" : "false", sys.led_gpio,
-        sys.default_led_gpio, sys.usb_power_gpio);
+        sys.default_led_gpio, sys.usb_power_gpio,
+        // The USB port's data lines are the chip's own (its internal PHY): fixed, not remappable.
+#if CONFIG_IDF_TARGET_ESP32S3 || CONFIG_IDF_TARGET_ESP32S2
+        "D− GPIO 19, D+ GPIO 20"
+#elif CONFIG_IDF_TARGET_ESP32P4
+        "the dedicated USB 2.0 high-speed pins"
+#else
+        ""
+#endif
+    );
     return b;
 }
 
@@ -484,7 +493,7 @@ extern "C" void app_main(void) {
              esp_app_get_description()->version);
 
     g_actions = xQueueCreate(4, sizeof(deck_ui::UiEvent));
-    xTaskCreatePinnedToCore(actions_task, "actions", 4096, nullptr, 4, nullptr, 1);
+    xTaskCreatePinnedToCore(actions_task, "actions", 4096, nullptr, 4, nullptr, portNUM_PROCESSORS - 1);
 
     deck_ui::Callbacks ui_cb;
     ui_cb.on_event = [](const deck_ui::UiEvent& ev) { xQueueSend(g_actions, &ev, 0); };
