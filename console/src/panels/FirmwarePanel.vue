@@ -17,6 +17,8 @@ import { store } from "../session/store.ts"
 
 const RELEASES = "https://github.com/lawrencebensaid/NetworkDeck/releases/latest"
 const PROJECT = "deck32" /* esp_app_desc_t.project_name of this firmware */
+/* esp_image_header_t.chip_id (byte 12) of the chips there are builds for */
+const CHIP_IDS: Record<number, string> = { 13: "ESP32-C6", 9: "ESP32-S3", 18: "ESP32-P4", 23: "ESP32-C5" }
 
 const file = ref<File | null>(null)
 const version = ref("")
@@ -45,6 +47,12 @@ async function inspect(f: File) {
   }
   if (head.length < 112 || head[0] !== 0xe9 || view.getUint32(32, true) !== 0xabcd5432) {
     problem.value = "This isn't a firmware image. Use networkdeck-<version>.bin from a release."
+    return
+  }
+  const chip = CHIP_IDS[view.getUint16(12, true)] ?? "another chip"
+  const mine = store.system?.chip
+  if (mine && chip !== mine) {
+    problem.value = `This image is for the ${chip}; this dock is an ${mine}. Use the ${mine === "ESP32-P4" ? "one without a chip name" : `one ending in -${mine.toLowerCase().replace("-", "")}`}.`
     return
   }
   const project = cstr(head.subarray(80, 112))

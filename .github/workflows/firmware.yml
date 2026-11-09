@@ -72,7 +72,8 @@ jobs:
         shell: bash
         run: |
           export DEBIAN_FRONTEND=noninteractive
-          apt-get update -qq && apt-get install -y -qq --no-install-recommends build-essential ninja-build > /dev/null
+          . "$IDF_PATH/export.sh" > /dev/null  # cmake and ninja come with ESP-IDF's tools
+          apt-get update -qq > /dev/null && apt-get install -y -qq --no-install-recommends build-essential > /dev/null
           cmake -S firmware/test/host -B build/host -G Ninja > /dev/null
           cmake --build build/host
           build/host/deck32_tests
@@ -82,6 +83,13 @@ jobs:
     runs-on: [self-hosted, linux, networkdeck-ci]
     container: espressif/idf:v6.1
     timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        # The P4 keeps the plain file names (the dock's own hardware); other chips carry their name.
+        include:
+          - { chip: esp32p4, dir: build, args: "", suffix: "", board: "the Waveshare ESP32-P4-NANO" }
+          - { chip: esp32c6, dir: build-c6, args: "-B build-c6 -DIDF_TARGET=esp32c6 -DSDKCONFIG=sdkconfig.c6", suffix: "-esp32c6", board: "ESP32-C6 boards (web interface only: no USB host)" }
     env:
       NETWORKDECK_VERSION: ${{ needs.plan.outputs.version }}
     defaults:
@@ -93,34 +101,35 @@ jobs:
         working-directory: firmware
         run: |
           . "$IDF_PATH/export.sh" > /dev/null
-          idf.py build
+          idf.py ${{ matrix.args }} build
       - name: Package
         id: package
         working-directory: firmware
         run: |
           apt-get update -qq > /dev/null 2>&1; apt-get install -y -qq --no-install-recommends zip > /dev/null 2>&1 || true
           . "$IDF_PATH/export.sh" > /dev/null
-          name=networkdeck-$NETWORKDECK_VERSION
+          name=networkdeck-$NETWORKDECK_VERSION${{ matrix.suffix }}
+          b=${{ matrix.dir }}
           dist=$GITHUB_WORKSPACE/dist
           mkdir -p "$dist/$name"
-          (cd build && python -m esptool --chip esp32p4 merge-bin -o "$dist/$name-full.bin" @flash_args)
-          cp build/deck32.bin "$dist/$name.bin"
-          cp build/deck32.elf "$dist/$name.elf"
+          (cd $b && python -m esptool --chip ${{ matrix.chip }} merge-bin -o "$dist/$name-full.bin" @flash_args)
+          cp $b/deck32.bin "$dist/$name.bin"
+          cp $b/deck32.elf "$dist/$name.elf"
           mkdir -p "$dist/$name/bootloader" "$dist/$name/partition_table"
-          cp build/bootloader/bootloader.bin "$dist/$name/bootloader/"
-          cp build/partition_table/partition-table.bin "$dist/$name/partition_table/"
-          cp build/deck32.bin build/ota_data_initial.bin build/flash_args "$dist/$name/"
+          cp $b/bootloader/bootloader.bin "$dist/$name/bootloader/"
+          cp $b/partition_table/partition-table.bin "$dist/$name/partition_table/"
+          cp $b/deck32.bin $b/ota_data_initial.bin $b/flash_args "$dist/$name/"
           cat > "$dist/$name/FLASHING.txt" <<TXT
-          NetworkDeck $NETWORKDECK_VERSION for the Waveshare ESP32-P4-NANO. Flash over the board's Type-C port.
+          NetworkDeck $NETWORKDECK_VERSION for ${{ matrix.board }}. Flash over the board's USB port.
 
           From this folder, with ESP-IDF's environment (or pip install esptool):
-            python -m esptool --chip esp32p4 -p <port> -b 460800 write-flash @flash_args
+            python -m esptool --chip ${{ matrix.chip }} -p <port> -b 460800 write-flash @flash_args
 
           Or the single image from the release: write networkdeck-$NETWORKDECK_VERSION-full.bin at 0x0.
           Later updates: upload networkdeck-$NETWORKDECK_VERSION.bin in the dock's web interface.
           TXT
           (cd "$dist" && zip -qr "$name.zip" "$name" && rm -rf "$name")
-          (cd "$dist" && sha256sum * > SHA256SUMS)
+          (cd "$dist" && sha256sum * > SHA256SUMS${{ matrix.suffix }})
           echo "name=$name" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
@@ -149,7 +158,7 @@ jobs:
           {
             awk -v v="$v" '$0 ~ "^## \\[" v "\\]" {f=1; next} f && /^## / {exit} f' CHANGELOG.md
             echo
-            echo "Firmware $v for the Waveshare ESP32-P4-NANO (PoE)."
+            echo "Firmware $v for the Waveshare ESP32-P4-NANO (PoE); \`*-esp32c6*\` files are for ESP32-C6 boards (web interface only)."
             echo
             echo '- `networkdeck-*-full.bin`: everything, to write at 0x0 over USB (first install).'
             echo '- `networkdeck-*.bin`: the app alone, for the web interface'"'"'s firmware upload.'
