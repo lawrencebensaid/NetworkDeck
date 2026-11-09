@@ -4,6 +4,7 @@
  * Stream Deck itself, so only someone at the dock can claim it; on the setup hotspot that is already true.
  */
 import { computed, ref } from "vue"
+import { KeyRound } from "@lucide/vue"
 
 import { Button } from "@/components/ui/button"
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
@@ -12,6 +13,7 @@ import { Label } from "@/components/ui/label"
 import { Spinner } from "@/components/ui/spinner"
 import BrandMark from "../components/BrandMark.vue"
 import { api } from "../session/api.ts"
+import { passkeysSupported, signInWithPasskey } from "../session/passkey.ts"
 import { signedIn, store } from "../session/store.ts"
 
 const props = defineProps<{ setup: boolean }>()
@@ -25,6 +27,20 @@ const waitingOnDeck = computed(() => busy.value && props.setup && !store.viaHots
 const canSubmit = computed(() =>
   props.setup ? password.value.length >= 8 && password.value === repeat.value : password.value.length > 0,
 )
+
+/* Passkeys: here when the page is at the dock's name over HTTPS; otherwise a pointer to that address. */
+const passkeyHere = computed(() => !props.setup && (store.auth?.passkeys ?? 0) > 0 && store.auth?.passkey_ready && passkeysSupported())
+const passkeyElsewhere = computed(() => !props.setup && (store.auth?.passkeys ?? 0) > 0 && !store.auth?.passkey_ready && store.auth?.https_available)
+const secureUrl = computed(() => `https://${store.auth?.hostname || location.hostname}.local/`.replace(".local.local", ".local"))
+
+async function passkey() {
+  busy.value = true
+  error.value = ""
+  const r = await signInWithPasskey()
+  busy.value = false
+  if (r.ok) signedIn()
+  else error.value = r.message
+}
 
 async function submit() {
   if (!canSubmit.value || busy.value) return
@@ -82,6 +98,13 @@ async function submit() {
             <Spinner v-if="busy" class="size-4" />
             {{ setup ? "Set password" : "Sign in" }}
           </Button>
+          <template v-if="passkeyHere">
+            <div class="my-1 flex items-center gap-3 text-xs text-muted-foreground"><span class="h-px flex-1 bg-border" />or<span class="h-px flex-1 bg-border" /></div>
+            <Button type="button" variant="outline" :disabled="busy" data-testid="passkey-sign-in" @click="passkey"><KeyRound /> Sign in with a passkey</Button>
+          </template>
+          <p v-else-if="passkeyElsewhere" class="text-center text-xs text-muted-foreground">
+            Passkeys work at <a class="underline underline-offset-2 hover:text-foreground" :href="secureUrl">{{ secureUrl.replace(/\/$/, "") }}</a>.
+          </p>
           <p v-if="setup && !store.viaHotspot" class="text-center text-xs text-muted-foreground">
             The dock asks you to confirm on the deck, so nobody else on your network can set it first.
           </p>

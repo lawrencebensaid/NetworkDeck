@@ -18,6 +18,15 @@ network, so your profiles and plugins run unchanged — no laptop next to the de
   there (press, release, long press), for automations — also while the Stream Deck app drives the
   deck.
 
+## HTTPS and passkeys
+
+The dock serves its interface over HTTP and over HTTPS. For HTTPS it is its own certificate
+authority, made on first start and limited (name-constrained) to the dock's own names and private
+addresses. Download it from **Settings → Users** (or `/ca.pem`), trust it once — on a Mac, open it and
+set it to Always Trust in Keychain Access — and `https://<name>.local` gets a padlock. There, Settings →
+Users adds passkeys (Touch ID, Face ID, a phone, a security key) to sign in without the password.
+Renaming the dock makes a new authority, to trust again.
+
 ## Matter
 
 Matter is off until you turn it on: open **Integrations → Matter** in the web interface (or the

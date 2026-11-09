@@ -19,6 +19,7 @@ struct Network {
 
 struct Hooks {
     std::function<std::string()> status_json;               // GET /api/status
+    std::function<std::string()> hostname;                  // in GET /api/auth, for the HTTPS address
     std::function<std::string()> deck_json;                 // GET /api/deck: model, keys, who draws
     std::function<std::vector<Network>()> scan;              // GET /api/scan
     std::function<std::string()> trace;                      // GET /trace

@@ -20,6 +20,7 @@
 #include "net.hpp"
 #include "nvs_flash.h"
 #include "settings.hpp"
+#include "tls.h"
 #include "usb_bridge.hpp"
 #include "web.hpp"
 
@@ -45,6 +46,8 @@ deck_ui::Ip4 to_ui(const settings::Ip4& ip) { return {ip[0], ip[1], ip[2], ip[3]
 settings::Ip4 from_ui(const deck_ui::Ip4& ip) { return {ip[0], ip[1], ip[2], ip[3]}; }
 
 void publish_net(const net::Status& s) {
+    // A DHCP address is named in the HTTPS certificate from the next start (static ones always are).
+    if (s.link == net::Link::Ethernet || s.link == net::Link::Wifi) tls_set_ip4(s.ip.c_str());
     {
         unsigned a = 0, b = 0, c = 0, d = 0;
         std::array<uint8_t, 4> ip{};
@@ -195,6 +198,15 @@ void matter_off_task(void*) {
 
 }  // namespace
 
+// What the HTTPS certificate names (components/tls): the hostname, and the static address if any.
+extern "C" void tls_host_hostname(char* out, size_t len) { std::snprintf(out, len, "%s", hostname().c_str()); }
+extern "C" bool tls_host_static_ip(char* out, size_t len) {
+    const auto n = settings::network();
+    if (n.dhcp) return false;
+    std::snprintf(out, len, "%u.%u.%u.%u", n.ip[0], n.ip[1], n.ip[2], n.ip[3]);
+    return true;
+}
+
 extern "C" void app_main(void) {
     esp_err_t err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -269,6 +281,7 @@ extern "C" void app_main(void) {
 
     web::Hooks hooks;
     hooks.status_json = status_json;
+    hooks.hostname = [] { return net::hostname(); };
     hooks.deck_json = deck_ui::deck_json;
     hooks.scan = [] {
         std::vector<web::Network> out;

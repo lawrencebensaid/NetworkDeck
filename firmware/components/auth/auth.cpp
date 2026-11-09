@@ -156,25 +156,32 @@ bool check_password(const std::string& password) {
     return equal(pbkdf2(password, salt), want);
 }
 
-Login login(const std::string& password, std::string& token) {
-    const int64_t now = esp_timer_get_time();
-    {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        if (now < g_locked_until) return Login::Locked;
+bool sign_in_locked() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return esp_timer_get_time() < g_locked_until;
+}
+
+void sign_in_failed() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (++g_failures >= kFreeTries) {
+        g_locked_until = esp_timer_get_time() + kLockUs;
+        g_failures = 0;
+        ESP_LOGW(TAG, "too many failed sign-ins: sign-in locked for 30 s");
     }
+}
+
+void sign_in_ok() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_failures = 0;
+}
+
+Login login(const std::string& password, std::string& token) {
+    if (sign_in_locked()) return Login::Locked;
     if (!check_password(password)) {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        if (++g_failures >= kFreeTries) {
-            g_locked_until = now + kLockUs;
-            g_failures = 0;
-            ESP_LOGW(TAG, "too many wrong passwords: sign-in locked for 30 s");
-        }
+        sign_in_failed();
         return Login::Wrong;
     }
-    {
-        std::lock_guard<std::mutex> lock(g_mutex);
-        g_failures = 0;
-    }
+    sign_in_ok();
     token = new_session();
     return Login::Ok;
 }

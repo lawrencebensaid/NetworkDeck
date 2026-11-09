@@ -12,7 +12,7 @@ import { cn } from "@/lib/utils"
 import AboutPanel from "../panels/AboutPanel.vue"
 import FirmwarePanel from "../panels/FirmwarePanel.vue"
 import NetworkPanel from "../panels/NetworkPanel.vue"
-import SecurityPanel from "../panels/SecurityPanel.vue"
+import UsersPanel from "../panels/UsersPanel.vue"
 import WifiPanel from "../panels/WifiPanel.vue"
 import { store } from "../session/store.ts"
 
@@ -32,7 +32,7 @@ const sections = computed<Section[]>(() => [
     ? [{ id: "wifi", title: "Wi-Fi", blurb: "The dock's wireless network.", view: WifiPanel }]
     : []),
   { id: "firmware", title: "Firmware", blurb: "What runs on the dock, and installing an update.", view: FirmwarePanel },
-  { id: "users", title: "Users", blurb: "Who signs in to this web interface, and how.", view: SecurityPanel },
+  { id: "users", title: "Users", blurb: "Who signs in to this web interface, and how: a password or passkeys.", view: UsersPanel },
 ])
 const extra: Section[] = [{ id: "about", title: "About", blurb: "What the dock says of itself.", view: AboutPanel }]
 
