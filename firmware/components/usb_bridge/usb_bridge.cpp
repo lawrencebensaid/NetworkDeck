@@ -21,6 +21,9 @@ constexpr char TAG[] = "usb";
 constexpr uint16_t kElgatoVid = 0x0FD9;
 constexpr size_t kMaxOut = 1024;
 constexpr size_t kOutQueueDepth = 16;
+// OUT reports in flight at once. The host driver queues them on the pipe and sends them back to back;
+// with one at a time every report waited for its completion callback (about 3 ms per 1 KB report).
+constexpr int kOutSlots = 4;
 constexpr size_t kCtrlMax = 1024;
 constexpr uint8_t kHidClass = 0x03;
 constexpr uint8_t kHidDescType = 0x21;
@@ -40,7 +43,7 @@ struct Device {
     uint16_t mps_in = 0, mps_out = 0;
     uint16_t report_desc_len = 0;
     usb_transfer_t* xin = nullptr;
-    usb_transfer_t* xout = nullptr;
+    usb_transfer_t* xout[kOutSlots] = {};
     usb_transfer_t* xctrl = nullptr;
     hidparse::ReportSizes sizes;
     DeckInfo info;
@@ -57,11 +60,14 @@ std::mutex g_info_mutex;
 
 Device g_dev;
 std::atomic<bool> g_attached{false};
-std::atomic<bool> g_out_busy{false};
+std::mutex g_out_mutex;  // guards the free OUT transfers
+usb_transfer_t* g_out_free[kOutSlots] = {};
+int g_out_free_n = 0;
+std::atomic<int> g_out_inflight{0};
 std::atomic<int> g_inflight{0};
 std::atomic<uint8_t> g_new_addr{0};
 std::atomic<bool> g_gone{false};
-std::atomic<TickType_t> g_out_since{0};  // when the in-flight OUT transfer was submitted
+std::atomic<TickType_t> g_out_done{0};  // when an OUT transfer last completed
 
 // ── transfers ──────────────────────────────────────────────────────────────
 
@@ -80,43 +86,44 @@ void kick_out();
 
 void out_cb(usb_transfer_t* x) {
     // A lost image packet corrupts that key until the host redraws it, so resend a failed report a
-    // few times. The data is still in the transfer buffer.
-    static int retries = 0;
+    // few times (the retry count rides in `context`). The data is still in the transfer buffer.
+    const intptr_t retries = reinterpret_cast<intptr_t>(x->context);
     if (x->status == USB_TRANSFER_STATUS_ERROR && g_attached && !g_gone && retries < 3) {
-        ++retries;
+        x->context = reinterpret_cast<void*>(retries + 1);
         if (usb_host_transfer_submit(x) == ESP_OK) return;
     }
     if (x->status != USB_TRANSFER_STATUS_COMPLETED) {
-        ESP_LOGW(TAG, "OUT transfer status %d after %d retries", x->status, retries);
-    } else if (retries) {
-        ESP_LOGI(TAG, "OUT report resent %d time(s)", retries);
+        ESP_LOGW(TAG, "OUT transfer status %d after %d retries", x->status, static_cast<int>(retries));
     }
-    retries = 0;
+    x->context = nullptr;
+    g_out_done = xTaskGetTickCount();
     --g_inflight;
-    g_out_busy = false;
+    --g_out_inflight;
+    {
+        std::lock_guard<std::mutex> lock(g_out_mutex);
+        g_out_free[g_out_free_n++] = x;
+    }
     kick_out();
 }
 
-// Submit the next queued OUT report if none is in flight. Safe from any task and from out_cb.
+// Submit queued OUT reports while there are free transfers. Safe from any task and from out_cb.
 void kick_out() {
-    for (;;) {
-        bool expected = false;
-        if (!g_out_busy.compare_exchange_strong(expected, true)) return;
-        OutMsg* msg = nullptr;
-        static OutMsg scratch;  // only touched by whoever holds g_out_busy
-        if (g_attached && xQueueReceive(g_out_q, &scratch, 0) == pdTRUE) msg = &scratch;
-        if (msg) {
-            std::memcpy(g_dev.xout->data_buffer, msg->data, msg->len);
-            g_dev.xout->num_bytes = msg->len;
-            ++g_inflight;
-            g_out_since = xTaskGetTickCountFromISR();
-            if (usb_host_transfer_submit(g_dev.xout) == ESP_OK) return;
+    static OutMsg scratch;  // only touched under g_out_mutex
+    std::lock_guard<std::mutex> lock(g_out_mutex);
+    while (g_attached && g_out_free_n > 0 && xQueueReceive(g_out_q, &scratch, 0) == pdTRUE) {
+        usb_transfer_t* x = g_out_free[--g_out_free_n];
+        std::memcpy(x->data_buffer, scratch.data, scratch.len);
+        x->num_bytes = scratch.len;
+        x->context = nullptr;
+        ++g_inflight;
+        if (g_out_inflight++ == 0) g_out_done = xTaskGetTickCount();  // the stuck-transfer clock starts now
+        if (usb_host_transfer_submit(x) != ESP_OK) {
             --g_inflight;
+            --g_out_inflight;
+            g_out_free[g_out_free_n++] = x;
             ESP_LOGW(TAG, "OUT submit failed");
+            break;
         }
-        g_out_busy = false;
-        // An item may have arrived between the empty receive and clearing the flag.
-        if (!g_attached || uxQueueMessagesWaiting(g_out_q) == 0) return;
     }
 }
 
@@ -200,6 +207,8 @@ bool parse_config(const usb_config_desc_t* cd) {
         } else if (in_hid && type == USB_B_DESCRIPTOR_TYPE_ENDPOINT && i + 5 < total) {
             const uint8_t addr = p[i + 2];
             const uint16_t mps = static_cast<uint16_t>((p[i + 4] | (p[i + 5] << 8)) & 0x7FF);
+            const uint8_t interval = i + 6 < total ? p[i + 6] : 0;
+            ESP_LOGI(TAG, "endpoint 0x%02x: %u bytes, bInterval %u", addr, mps, interval);
             if (addr & 0x80) {
                 g_dev.ep_in = addr;
                 g_dev.mps_in = mps;
@@ -214,10 +223,16 @@ bool parse_config(const usb_config_desc_t* cd) {
 }
 
 void free_transfers() {
-    for (usb_transfer_t** x : {&g_dev.xin, &g_dev.xout, &g_dev.xctrl}) {
+    for (usb_transfer_t** x : {&g_dev.xin, &g_dev.xctrl}) {
         if (*x) usb_host_transfer_free(*x);
         *x = nullptr;
     }
+    for (auto& x : g_dev.xout) {
+        if (x) usb_host_transfer_free(x);
+        x = nullptr;
+    }
+    std::lock_guard<std::mutex> lock(g_out_mutex);
+    g_out_free_n = 0;
 }
 
 void close_device() {
@@ -243,7 +258,7 @@ void close_device() {
     g_dev = Device{};
     xSemaphoreGive(g_ctrl_mutex);
     g_inflight = 0;
-    g_out_busy = false;
+    g_out_inflight = 0;
     ESP_LOGI(TAG, "deck closed");
 }
 
@@ -310,8 +325,9 @@ void open_device(uint8_t addr) {
     // Non-control IN transfers must be a multiple of MPS.
     const size_t in_buf = ((in_size + g_dev.mps_in - 1) / g_dev.mps_in) * g_dev.mps_in;
 
-    if (usb_host_transfer_alloc(in_buf, 0, &g_dev.xin) != ESP_OK ||
-        usb_host_transfer_alloc(kMaxOut, 0, &g_dev.xout) != ESP_OK) {
+    bool alloc_ok = usb_host_transfer_alloc(in_buf, 0, &g_dev.xin) == ESP_OK;
+    for (auto& x : g_dev.xout) alloc_ok = alloc_ok && usb_host_transfer_alloc(kMaxOut, 0, &x) == ESP_OK;
+    if (!alloc_ok) {
         close_device();
         return;
     }
@@ -319,9 +335,17 @@ void open_device(uint8_t addr) {
     g_dev.xin->bEndpointAddress = g_dev.ep_in;
     g_dev.xin->num_bytes = static_cast<int>(in_buf);
     g_dev.xin->callback = in_cb;
-    g_dev.xout->device_handle = g_dev.hdl;
-    g_dev.xout->bEndpointAddress = g_dev.ep_out;
-    g_dev.xout->callback = out_cb;
+    {
+        std::lock_guard<std::mutex> lock(g_out_mutex);
+        g_out_free_n = 0;
+        for (auto* x : g_dev.xout) {
+            x->device_handle = g_dev.hdl;
+            x->bEndpointAddress = g_dev.ep_out;
+            x->callback = out_cb;
+            x->context = nullptr;
+            g_out_free[g_out_free_n++] = x;
+        }
+    }
 
     {
         std::lock_guard<std::mutex> lock(g_info_mutex);
@@ -384,9 +408,9 @@ void client_task(void*) {
         usb_host_client_handle_events(g_client, pdMS_TO_TICKS(50));
         if (xTaskGetTickCount() - last_check > pdMS_TO_TICKS(1000)) {
             last_check = xTaskGetTickCount();
-            if (g_out_busy && last_check - g_out_since > pdMS_TO_TICKS(1000)) {
-                ESP_LOGW(TAG, "OUT transfer in flight for %u ms, %u reports queued",
-                         static_cast<unsigned>(pdTICKS_TO_MS(last_check - g_out_since)),
+            if (g_out_inflight > 0 && last_check - g_out_done > pdMS_TO_TICKS(1000)) {
+                ESP_LOGW(TAG, "%d OUT transfers stuck for %u ms, %u reports queued", g_out_inflight.load(),
+                         static_cast<unsigned>(pdTICKS_TO_MS(last_check - g_out_done)),
                          static_cast<unsigned>(uxQueueMessagesWaiting(g_out_q)));
             }
         }

@@ -15,7 +15,7 @@ NetInfo dhcp_net() {
     NetInfo n;
     n.link = "Ethernet";
     n.ip = "10.0.1.187";
-    n.firmware = "1.00.000";
+    n.firmware = "1.01.017";
     n.dhcp = true;
     return n;
 }
@@ -125,7 +125,7 @@ TEST_CASE("qr code of the hotspot string fits on one key") {
 TEST_CASE("static editor: DHCP key opens the editor pre-filled, OK walks the fields, then SetStatic") {
     Ui ui(mk2());
     ui.set_net(dhcp_net());
-    CHECK(ui.on_key(3, true, 0).kind == UiEvent::Kind::None);  // mode key -> editor
+    CHECK(ui.on_key(6, true, 0).kind == UiEvent::Kind::None);  // mode key -> editor
     // ip pre-filled from the current address; select the last octet and bump it twice
     ui.on_key(4, true, 10);
     ui.on_key(12, true, 20);
@@ -146,12 +146,12 @@ TEST_CASE("static editor: down wraps, cancel returns without an event") {
     n.ip = "";
     n.ip4 = {0, 0, 0, 0};
     ui.set_net(n);
-    ui.on_key(3, true, 0);
+    ui.on_key(6, true, 0);
     ui.on_key(13, true, 10);  // first octet 0 -> 255
     ui.on_key(13, false, 20);
     CHECK(ui.on_key(10, true, 30).kind == UiEvent::Kind::None);
     // back on the network page: the mode key opens the editor again rather than doing anything else
-    CHECK(ui.on_key(3, true, 40).kind == UiEvent::Kind::None);
+    CHECK(ui.on_key(6, true, 40).kind == UiEvent::Kind::None);
 }
 
 TEST_CASE("holding up auto-repeats") {
@@ -159,7 +159,7 @@ TEST_CASE("holding up auto-repeats") {
     NetInfo n = dhcp_net();
     n.ip = "10.0.1.0";
     ui.set_net(n);
-    ui.on_key(3, true, 0);
+    ui.on_key(6, true, 0);
     ui.on_key(4, true, 0);    // last octet = 0
     ui.on_key(12, true, 0);   // 1
     for (uint32_t t = 0; t <= 1000; t += 10) ui.on_tick(t);
@@ -176,7 +176,7 @@ TEST_CASE("mode key in static mode switches back to DHCP") {
     NetInfo n = dhcp_net();
     n.dhcp = false;
     ui.set_net(n);
-    CHECK(ui.on_key(3, true, 0).kind == UiEvent::Kind::SetDhcp);
+    CHECK(ui.on_key(6, true, 0).kind == UiEvent::Kind::SetDhcp);
 }
 
 TEST_CASE("prompt: OK answers yes, timeout answers no, other keys are ignored") {
@@ -203,7 +203,7 @@ TEST_CASE("mini prompt keys and editor octet cycling") {
     ui.set_net(dhcp_net());
     ui.prompt(1, "Install firmware?", 0);
     CHECK(ui.on_key(5, true, 10).yes);
-    ui.on_key(2, true, 20);  // mode key on the Mini -> editor
+    ui.on_key(4, true, 20);  // mode key on the Mini (second row, middle) -> editor
     ui.on_key(1, true, 30);  // octet key: next octet (1)
     ui.on_key(2, true, 40);  // up: 0 -> 1 for octet 1 of 10.0.1.187
     ui.on_key(2, false, 50);
@@ -220,7 +220,15 @@ TEST_CASE("every screen renders on every key without going out of bounds") {
         ui.set_net(dhcp_net());
         Canvas c(m->key_px, m->key_px);
         for (int k = 0; k < m->keys(); ++k) ui.render(k, c);
-        ui.on_key(m->cols >= 5 ? 3 : 2, true, 0);
+        ui.on_key(m->cols + 1, true, 0);  // the mode key: into the editor
+        for (int k = 0; k < m->keys(); ++k) ui.render(k, c);
+        ui.on_key(m->cols >= 5 ? 10 : 3, true, 0);  // ✕: back
+        ui.on_key(m->cols + 2, true, 0);  // Setup
+        for (int k = 0; k < m->keys(); ++k) ui.render(k, c);
+        ui.on_key(1, true, 0);  // Ethernet
+        for (int k = 0; k < m->keys(); ++k) ui.render(k, c);
+        ui.on_key(0, true, 0);
+        ui.on_key(2, true, 0);  // Wi-Fi
         for (int k = 0; k < m->keys(); ++k) ui.render(k, c);
         ui.prompt(1, "Install firmware 1.01.000?", 0);
         for (int k = 0; k < m->keys(); ++k) ui.render(k, c);
@@ -230,6 +238,64 @@ TEST_CASE("every screen renders on every key without going out of bounds") {
         for (int k = 0; k < m->keys(); ++k) ui.render(k, c);
         CHECK(c.width() == m->key_px);
     }
+}
+
+TEST_CASE("setup: Ethernet, then Static IP opens the editor; info keys do nothing") {
+    Ui ui(mk2());
+    NetInfo n = dhcp_net();
+    n.dhcp = false;
+    n.ip4 = {192, 168, 1, 50};
+    ui.set_net(n);
+    for (int k : {0, 1, 2, 5}) CHECK(ui.on_key(k, true, 0).kind == UiEvent::Kind::None);
+    CHECK(ui.page() == Ui::Page::Network);
+    ui.on_key(7, true, 10);  // Setup
+    CHECK(ui.page() == Ui::Page::Setup);
+    ui.on_key(1, true, 11);  // Ethernet
+    CHECK(ui.page() == Ui::Page::Ethernet);
+    CHECK(ui.on_key(2, true, 12).kind == UiEvent::Kind::None);  // Static IP -> editor, pre-filled
+    CHECK(ui.page() == Ui::Page::Editor);
+    CHECK(ui.on_key(14, true, 20).kind == UiEvent::Kind::None);
+    CHECK(ui.on_key(14, true, 30).kind == UiEvent::Kind::None);
+    auto ev = ui.on_key(14, true, 40);
+    REQUIRE(ev.kind == UiEvent::Kind::SetStatic);
+    CHECK(ev.ip == Ip4{10, 0, 1, 187});  // the current address wins over the stored one
+    CHECK(ui.page() == Ui::Page::Ethernet);  // back where the editor was opened
+}
+
+TEST_CASE("setup: Wi-Fi opens the hotspot, Back closes it, the switch turns Wi-Fi off and on") {
+    for (const Model* m : {&mk2(), &mini()}) {
+        Ui ui(*m);
+        NetInfo n = dhcp_net();
+        ui.set_net(n);
+        ui.on_key(m->cols + 2, true, 0);  // Setup
+        CHECK(ui.on_key(2, true, 1).kind == UiEvent::Kind::OpenHotspot);
+        CHECK(ui.page() == Ui::Page::Wifi);
+        auto ev = ui.on_key(1, true, 2);
+        CHECK(ev.kind == UiEvent::Kind::SetWifi);
+        CHECK_FALSE(ev.yes);
+        n.wifi_on = false;
+        ui.set_net(n);
+        CHECK(ui.on_key(1, true, 3).yes);
+        CHECK(ui.on_key(0, true, 4).kind == UiEvent::Kind::CloseHotspot);
+        CHECK(ui.page() == Ui::Page::Setup);
+        ui.on_key(0, true, 5);
+        CHECK(ui.page() == Ui::Page::Network);
+    }
+}
+
+TEST_CASE("with no other network, the hotspot brings up the Wi-Fi page") {
+    Ui ui(mini());
+    NetInfo n;
+    n.link = "Hotspot";
+    ui.set_net(n);
+    ui.set_hotspot({true, "Deck32-204C", "abcd2345", "192.168.4.1"});
+    CHECK(ui.page() == Ui::Page::Wifi);
+}
+
+TEST_CASE("an address splits over two keys after its second dot") {
+    CHECK(ip_parts("10.0.1.187") == std::pair<std::string, std::string>{"10.0.", "1.187"});
+    CHECK(ip_parts("192.168.100.200") == std::pair<std::string, std::string>{"192.168.", "100.200"});
+    CHECK(ip_parts("") == std::pair<std::string, std::string>{"", ""});
 }
 
 TEST_CASE("holding both top corner keys for 10 s asks for a factory reset, once") {
@@ -242,4 +308,30 @@ TEST_CASE("holding both top corner keys for 10 s asks for a factory reset, once"
     CHECK(ui.on_tick(1000 + Ui::kResetHoldMs + 100).kind == UiEvent::Kind::None);
     ui.on_key(4, false, 20000);
     CHECK(ui.on_tick(30000).kind == UiEvent::Kind::None);
+}
+
+TEST_CASE("image reports split back into key, part, last and payload") {
+    std::vector<uint8_t> img(2100, 7);
+    auto reports = image_reports(mk2(), 9, img);
+    size_t total = 0;
+    for (size_t i = 0; i < reports.size(); ++i) {
+        ImagePart p;
+        REQUIRE(parse_image_report(mk2(), reports[i].data(), reports[i].size(), p));
+        CHECK(p.key == 9);
+        CHECK(p.part == static_cast<int>(i));
+        CHECK(p.last == (i + 1 == reports.size()));
+        total += p.len;
+    }
+    CHECK(total == img.size());
+    auto mini_reports = image_reports(mini(), 4, img);
+    ImagePart q;
+    REQUIRE(parse_image_report(mini(), mini_reports[0].data(), mini_reports[0].size(), q));
+    CHECK(q.key == 4);
+    uint8_t fill[] = {0x03, 0x06, 2, 10, 20, 30};
+    int key = -1;
+    Rgb c;
+    REQUIRE(parse_fill_report(mk2(), fill, sizeof(fill), key, c));
+    CHECK(key == 2);
+    CHECK(c.g == 20);
+    CHECK(std::string(css_transform(mk2())) == "rotate(180deg)");
 }

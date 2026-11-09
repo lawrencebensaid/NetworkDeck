@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <title>NetworkDeck</title>
+    <script>
+      (function () {
+        var theme = "system";
+        try { theme = JSON.parse(localStorage.getItem("nd-theme") || '"system"'); } catch (e) {}
+        var dark = theme === "dark";
+        try { if (theme === "system") dark = matchMedia("(prefers-color-scheme: dark)").matches; } catch (e) {}
+        document.documentElement.classList.toggle("dark", dark);
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

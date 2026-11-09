@@ -135,4 +135,41 @@ std::vector<bool> key_states(const Model& m, const uint8_t* report, size_t len) 
     return keys;
 }
 
+bool parse_image_report(const Model& m, const uint8_t* r, size_t len, ImagePart& out) {
+    if (len < 16 || r[0] != 0x02) return false;
+    if (m.header == Model::Header::Gen2) {
+        if (r[1] != 0x07) return false;
+        out.key = r[2];
+        out.last = r[3] != 0;
+        out.len = std::min<size_t>(r[4] | (r[5] << 8), len - 8);
+        out.part = r[6] | (r[7] << 8);
+        out.data = r + 8;
+    } else {
+        if (r[1] != 0x01 || r[5] == 0) return false;
+        out.part = r[2];
+        out.last = r[4] != 0;
+        out.key = r[5] - 1;
+        out.data = r + 16;
+        out.len = len - 16;  // gen1 has no length field: the BMP header says how much is real
+    }
+    return out.key >= 0 && out.key < m.keys();
+}
+
+bool parse_fill_report(const Model& m, const uint8_t* r, size_t len, int& key, Rgb& color) {
+    if (m.header != Model::Header::Gen2 || len < 6 || r[0] != 0x03 || r[1] != 0x06) return false;
+    key = r[2];
+    color = {r[3], r[4], r[5]};
+    return key < m.keys();
+}
+
+const char* css_transform(const Model& m) {
+    // Inverse of transform(): flips undo themselves; the Mini's swap + y flip, shown bottom-up as BMP
+    // rows, comes out as a transpose.
+    if (m.rotate) return "rotate(90deg) scaleX(-1)";
+    if (m.x_flip && m.y_flip) return "rotate(180deg)";
+    if (m.x_flip) return "scaleX(-1)";
+    if (m.y_flip) return "scaleY(-1)";
+    return "none";
+}
+
 }  // namespace deck_ui

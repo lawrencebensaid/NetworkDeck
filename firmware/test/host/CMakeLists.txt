@@ -1,4 +1,4 @@
-# Mac-side unit tests for the pure components (cora, hidparse, deck_ui).
+# Mac-side unit tests for the pure components (cora, hidparse, deck_ui, auth's WebAuthn checks).
 #   build/render_screens <dir> writes every deck_ui screen as PPM images, to look at layouts.
 #   cmake -S firmware/test/host -B firmware/test/host/build && cmake --build firmware/test/host/build && firmware/test/host/build/deck32_tests
 cmake_minimum_required(VERSION 3.22)
@@ -22,11 +22,13 @@ add_executable(deck32_tests
   test_session.cpp
   test_hidparse.cpp
   test_deck_ui.cpp
+  test_webauthn.cpp
+  ${COMP}/auth/webauthn.cpp
   ${COMP}/cora/src/frame.cpp
   ${COMP}/cora/src/protocol.cpp
   ${COMP}/cora/src/session.cpp
   ${COMP}/hidparse/src/hid_descriptor.cpp)
-target_include_directories(deck32_tests PRIVATE ${COMP}/cora/include ${COMP}/hidparse/include)
+target_include_directories(deck32_tests PRIVATE ${COMP}/cora/include ${COMP}/hidparse/include ${COMP}/auth/include)
 target_compile_options(deck32_tests PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(deck32_tests PRIVATE doctest::doctest deck_ui_core)
 
@@ -34,6 +36,7 @@ target_link_libraries(deck32_tests PRIVATE doctest::doctest deck_ui_core)
 add_library(deck_ui_core STATIC
   ${COMP}/deck_ui/src/canvas.cpp
   ${COMP}/deck_ui/src/font_data.cpp
+  ${COMP}/deck_ui/src/font_mono_data.cpp
   ${COMP}/deck_ui/src/model.cpp
   ${COMP}/deck_ui/src/ui.cpp
   ${COMP}/deck_ui/third_party/qrcodegen.c)

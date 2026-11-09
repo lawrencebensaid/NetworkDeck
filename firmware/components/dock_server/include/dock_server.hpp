@@ -16,11 +16,22 @@ struct Config {
     cora::DockIdentity identity;
     // Fires when the first host connects (true) and when the last of its connections closes (false).
     std::function<void(bool connected)> on_host_change;
+    // Every output report and feature report the host sends the deck (for the web interface's live view).
+    std::function<void(const uint8_t* report, size_t len)> on_host_output;
+    std::function<void(const uint8_t* report, size_t len)> on_host_feature;
 };
 
 void start(const Config& config);
 
 bool host_connected();
+
+// The computer running the Stream Deck app: its address (empty when none) and how long it has been
+// connected.
+struct Host {
+    std::string ip;
+    uint32_t seconds = 0;
+};
+Host host();
 
 // Wire these to usb_bridge's callbacks.
 void deck_attached(const usb_bridge::DeckInfo& info);

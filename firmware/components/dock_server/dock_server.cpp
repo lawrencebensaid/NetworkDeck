@@ -43,9 +43,22 @@ struct Slot {
 Config g_config;
 std::mutex g_mutex;  // guards g_slot and g_child, and keeps Conns alive while others send on them
 Slot g_slot;
+int64_t g_host_since = 0;  // esp_timer time the current host connected
 cora::ChildInfo g_child;
 std::atomic<uint8_t> g_conn_no{0};
 std::atomic<bool> g_paused{false};
+
+// Throughput counters, logged once a second while traffic flows (debug level: esp_log_level_set("dock", ESP_LOG_DEBUG)).
+std::atomic<uint32_t> g_rx_bytes{0}, g_usb_reports{0}, g_usb_wait_us{0}, g_recv_calls{0};
+void perf_tick() {
+    static int64_t last = 0;
+    const int64_t now = esp_timer_get_time();
+    if (now - last < 1000000) return;
+    last = now;
+    const uint32_t rx = g_rx_bytes.exchange(0), rep = g_usb_reports.exchange(0), wait = g_usb_wait_us.exchange(0),
+                   calls = g_recv_calls.exchange(0);
+    if (rx || rep) ESP_LOGD(TAG, "perf: %u KB/s in (%u recv), %u reports/s to USB, %u ms waiting on USB", rx / 1024, calls, rep, wait / 1000);
+}
 
 std::mutex g_trace_mutex;
 std::deque<std::string> g_trace;
@@ -106,16 +119,21 @@ bool execute(Conn* c, const cora::Action& a) {
         case K::UsbWrite: {
             if (g_paused) return true;  // the dock is showing a prompt; the host redraws after the replug
             // Blocking here stops us reading the socket: TCP then slows the host down.
+            const int64_t t0 = esp_timer_get_time();
+            ++g_usb_reports;
+            if (g_config.on_host_output) g_config.on_host_output(a.frame.payload.data(), a.frame.payload.size());
             while (!usb_bridge::write(a.frame.payload.data(), a.frame.payload.size(), pdMS_TO_TICKS(200))) {
                 if (!usb_bridge::attached()) return true;  // deck gone: drop, the plug event tells the host
                 for (const auto& t : c->session.on_tick(Conn::now_ms()))
                     if (!send_frame(c, t.frame)) return false;
             }
+            g_usb_wait_us += static_cast<uint32_t>(esp_timer_get_time() - t0);
             return true;
         }
         case K::UsbSetFeature:
             if (g_paused) return true;
             ESP_LOGI(TAG, "deck ← set %s", cora::describe(a.frame).c_str());
+            if (g_config.on_host_feature) g_config.on_host_feature(a.frame.payload.data(), a.frame.payload.size());
             usb_bridge::set_feature(a.frame.payload.data(), a.frame.payload.size());
             return true;
         case K::UsbGetFeature: {
@@ -142,16 +160,21 @@ void conn_task(void* arg) {
     setsockopt(c->fd, SOL_SOCKET, SO_RCVTIMEO, &rcv, sizeof(rcv));
     timeval snd{2, 0};
     setsockopt(c->fd, SOL_SOCKET, SO_SNDTIMEO, &snd, sizeof(snd));
+    const int rcvbuf = 65534;
+    setsockopt(c->fd, SOL_SOCKET, SO_RCVBUF, &rcvbuf, sizeof(rcvbuf));
 
     ESP_LOGI(TAG, "%s connection #%u from %s", port_name(c->port), c->session.conn_no(), ip_str(c->peer_ip).c_str());
     bool alive = send_frame(c, c->session.greeting(Conn::now_ms()));
 
-    static constexpr size_t kBuf = 4096;
+    static constexpr size_t kBuf = 16384;
     uint8_t* buf = static_cast<uint8_t*>(malloc(kBuf));
     while (alive && buf) {
         int n = recv(c->fd, buf, kBuf, 0);
         const uint32_t now = Conn::now_ms();
+        perf_tick();
         if (n > 0) {
+            g_rx_bytes += static_cast<uint32_t>(n);
+            ++g_recv_calls;
             for (const auto& a : c->session.on_bytes(buf, static_cast<size_t>(n), identity_snapshot(), child_snapshot(), now)) {
                 if (!(alive = execute(c, a))) break;
             }
@@ -230,6 +253,7 @@ void listener_task(void* arg) {
                 c = new Conn(fd, port, ip, ++g_conn_no);
                 if (g_slot.dock) shutdown(g_slot.dock->fd, SHUT_RDWR);  // same host reconnecting
                 host_new = g_slot.ip == 0;
+                if (host_new) g_host_since = esp_timer_get_time();
                 g_slot.ip = ip;
                 g_slot.dock = c;
             } else if (port == cora::Port::Child && g_slot.ip == ip && g_child.attached) {
@@ -271,6 +295,15 @@ void start(const Config& config) {
 bool host_connected() {
     std::lock_guard<std::mutex> lock(g_mutex);
     return g_slot.ip != 0;
+}
+
+Host host() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    Host h;
+    if (!g_slot.ip) return h;
+    h.ip = ip_str(g_slot.ip);
+    h.seconds = static_cast<uint32_t>((esp_timer_get_time() - g_host_since) / 1000000);
+    return h;
 }
 
 void deck_attached(const usb_bridge::DeckInfo& info) {

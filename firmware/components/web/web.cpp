@@ -1,12 +1,16 @@
 #include "web.hpp"
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
 
+#include "auth.hpp"
+#include "tls.h"
 #include "esp_app_desc.h"
 #include "esp_http_server.h"
+#include "esp_https_server.h"
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
@@ -14,17 +18,22 @@
 #include "freertos/task.h"
 #include "lwip/sockets.h"
 
-extern const char index_html_start[] asm("_binary_index_html_start");
-extern const char index_html_end[] asm("_binary_index_html_end");
+// The console (console/), built and gzipped by `npm run build:firmware`.
+extern const uint8_t index_gz_start[] asm("_binary_index_html_gz_start");
+extern const uint8_t index_gz_end[] asm("_binary_index_html_gz_end");
 
 namespace web {
 namespace {
 
 constexpr char TAG[] = "web";
+constexpr char kCookie[] = "nd_session";
 Hooks g_hooks;
+constexpr char kSecure[] = "https";
+std::string g_ca_pem;  // the dock's certificate authority, offered at /ca.pem to trust once
+bool g_https = false;
 
-// Requests from the setup hotspot (192.168.4.x) need no confirmation: its password is only shown on
-// the deck, so whoever is on it is standing next to the dock.
+// Requests from the setup hotspot (192.168.4.x) need no confirmation on the deck: its password is only
+// shown on the deck, so whoever is on it is standing next to the dock.
 bool from_hotspot(httpd_req_t* req) {
     sockaddr_in6 addr{};
     socklen_t len = sizeof(addr);
@@ -56,18 +65,19 @@ esp_err_t send_json(httpd_req_t* req, const std::string& body, const char* statu
     return httpd_resp_send(req, body.c_str(), static_cast<ssize_t>(body.size()));
 }
 
-esp_err_t result(httpd_req_t* req, bool ok, const std::string& message) {
+esp_err_t result(httpd_req_t* req, bool ok, const std::string& message, const char* fail_status = "409 Conflict") {
     return send_json(req, std::string("{\"ok\":") + (ok ? "true" : "false") + ",\"message\":\"" + json_escape(message) + "\"}",
-                     ok ? "200 OK" : "409 Conflict");
+                     ok ? "200 OK" : fail_status);
 }
 
 // Reads an application/x-www-form-urlencoded body (small forms only).
 bool read_form(httpd_req_t* req, std::string& body) {
-    if (req->content_len > 2048) return false;
+    if (req->content_len > 4096) return false;
     body.resize(req->content_len);
     size_t got = 0;
     while (got < body.size()) {
         int n = httpd_req_recv(req, body.data() + got, body.size() - got);
+        if (n == HTTPD_SOCK_ERR_TIMEOUT) continue;
         if (n <= 0) return false;
         got += static_cast<size_t>(n);
     }
@@ -110,20 +120,209 @@ bool confirmed(httpd_req_t* req, const std::string& question) {
     return g_hooks.confirm && g_hooks.confirm(question);
 }
 
+// ── sessions ────────────────────────────────────────────────────────────────
+
+std::string session_of(httpd_req_t* req) {
+    char val[48];
+    size_t len = sizeof(val);
+    if (httpd_req_get_cookie_val(req, kCookie, val, &len) != ESP_OK) return {};
+    return val;
+}
+
+void set_session_cookie(httpd_req_t* req, const std::string& token) {
+    // The header value must outlive the response: keep it per request in a static ring.
+    static char buf[4][128];
+    static int i = 0;
+    char* c = buf[i++ % 4];
+    if (token.empty()) {
+        std::snprintf(c, 128, "%s=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0", kCookie);
+    } else {
+        std::snprintf(c, 128, "%s=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=604800", kCookie, token.c_str());
+    }
+    httpd_resp_set_hdr(req, "Set-Cookie", c);
+}
+
+// Every request but the page and sign-in needs a session. Changes also need the X-NetworkDeck header,
+// which a page on another site cannot send without a preflight the dock never answers.
+bool allowed(httpd_req_t* req, bool change) {
+    if (change) {
+        char v[8];
+        if (httpd_req_get_hdr_value_str(req, "X-NetworkDeck", v, sizeof(v)) != ESP_OK) {
+            result(req, false, "Missing X-NetworkDeck header", "403 Forbidden");
+            return false;
+        }
+    }
+    if (!auth::valid(session_of(req))) {
+        result(req, false, auth::password_set() ? "Sign in first" : "Choose a password first", "401 Unauthorized");
+        return false;
+    }
+    return true;
+}
+
 // ── handlers ────────────────────────────────────────────────────────────────
 
 esp_err_t index_get(httpd_req_t* req) {
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    return httpd_resp_send(req, index_html_start, index_html_end - index_html_start - 1);
+    httpd_resp_set_hdr(req, "Content-Encoding", "gzip");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
+    httpd_resp_set_hdr(req, "X-Frame-Options", "DENY");
+    return httpd_resp_send(req, reinterpret_cast<const char*>(index_gz_start), index_gz_end - index_gz_start);
+}
+
+bool secure(httpd_req_t* req) { return req->user_ctx == kSecure; }
+
+// Passkeys need the page at the dock's name over HTTPS (WebAuthn takes no IP addresses and no plain
+// HTTP): the relying party id is the Host header's name. True and `rp_id` set when that is so.
+bool passkey_host(httpd_req_t* req, std::string& rp_id) {
+    if (!secure(req)) return false;
+    char host[96] = "";
+    if (httpd_req_get_hdr_value_str(req, "Host", host, sizeof(host)) != ESP_OK) return false;
+    std::string h = host;
+    if (const size_t colon = h.find(':'); colon != std::string::npos) h.resize(colon);
+    if (h.empty() || h.find_first_not_of("0123456789.") == std::string::npos) return false;  // an IPv4 address
+    if (h.front() == '[') return false;                                                       // an IPv6 address
+    for (char& c : h) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    rp_id = h;
+    return true;
+}
+
+std::string origin_of(httpd_req_t* req) {
+    char host[96] = "";
+    httpd_req_get_hdr_value_str(req, "Host", host, sizeof(host));
+    std::string h = host;
+    for (char& c : h) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    return "https://" + h;
+}
+
+esp_err_t ca_get(httpd_req_t* req) {
+    if (g_ca_pem.empty()) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "No certificate");
+        return ESP_OK;
+    }
+    httpd_resp_set_type(req, "application/x-pem-file");
+    httpd_resp_set_hdr(req, "Content-Disposition", "attachment; filename=\"networkdeck-ca.pem\"");
+    return httpd_resp_send(req, g_ca_pem.c_str(), static_cast<ssize_t>(g_ca_pem.size()));
+}
+
+esp_err_t passkeys_get(httpd_req_t* req) {
+    if (!allowed(req, false)) return ESP_OK;
+    std::string j = "[";
+    bool first = true;
+    for (const auto& p : auth::passkeys()) {
+        j += std::string(first ? "" : ",") + "{\"id\":\"" + p.id + "\",\"name\":\"" + json_escape(p.name) + "\"}";
+        first = false;
+    }
+    return send_json(req, j + "]");
+}
+
+esp_err_t passkey_register_options_post(httpd_req_t* req) {
+    if (!allowed(req, true)) return ESP_OK;
+    std::string rp, body;
+    if (!passkey_host(req, rp)) return result(req, false, "Open the dock at https://<name>.local to add a passkey");
+    if (!read_form(req, body)) return result(req, false, "Bad request", "400 Bad Request");
+    // A stolen session must not be able to add a way back in: the password is asked again.
+    if (!auth::check_password(field(body, "password"))) return result(req, false, "The password is wrong", "401 Unauthorized");
+    return send_json(req, auth::passkey_create_options(rp));
+}
+
+esp_err_t passkey_register_post(httpd_req_t* req) {
+    if (!allowed(req, true)) return ESP_OK;
+    std::string rp, body;
+    if (!passkey_host(req, rp)) return result(req, false, "Open the dock at https://<name>.local to add a passkey");
+    if (!read_form(req, body)) return result(req, false, "Bad request", "400 Bad Request");
+    std::string name = field(body, "name");
+    if (name.size() > 64) name.resize(64);
+    if (const char* why = auth::passkey_add(rp, origin_of(req), field(body, "client"), field(body, "attestation"), name))
+        return result(req, false, why);
+    return result(req, true, "Passkey added");
+}
+
+esp_err_t passkey_delete_post(httpd_req_t* req) {
+    if (!allowed(req, true)) return ESP_OK;
+    std::string body;
+    if (!read_form(req, body)) return result(req, false, "Bad request", "400 Bad Request");
+    if (!auth::passkey_remove(field(body, "id"))) return result(req, false, "No such passkey");
+    return result(req, true, "Passkey removed");
+}
+
+esp_err_t passkey_login_options_post(httpd_req_t* req) {
+    char v[8];
+    if (httpd_req_get_hdr_value_str(req, "X-NetworkDeck", v, sizeof(v)) != ESP_OK)
+        return result(req, false, "Missing X-NetworkDeck header", "403 Forbidden");
+    std::string rp;
+    if (!passkey_host(req, rp)) return result(req, false, "Passkeys work at https://<name>.local");
+    if (auth::passkeys().empty()) return result(req, false, "No passkey is set up on the dock");
+    return send_json(req, auth::passkey_get_options(rp));
+}
+
+esp_err_t passkey_login_post(httpd_req_t* req) {
+    char v[8];
+    if (httpd_req_get_hdr_value_str(req, "X-NetworkDeck", v, sizeof(v)) != ESP_OK)
+        return result(req, false, "Missing X-NetworkDeck header", "403 Forbidden");
+    std::string rp, body, token;
+    if (!passkey_host(req, rp)) return result(req, false, "Passkeys work at https://<name>.local");
+    if (!read_form(req, body)) return result(req, false, "Bad request", "400 Bad Request");
+    const char* why = nullptr;
+    switch (auth::passkey_login(rp, origin_of(req), field(body, "id"), field(body, "client"), field(body, "authenticator"),
+                                field(body, "signature"), token, why)) {
+        case auth::Login::Ok:
+            set_session_cookie(req, token);
+            return result(req, true, "Signed in");
+        case auth::Login::Locked:
+            return result(req, false, "Too many failed sign-ins. Try again in 30 seconds.", "429 Too Many Requests");
+        default:
+            return result(req, false, why ? why : "The passkey was not accepted", "401 Unauthorized");
+    }
+}
+
+esp_err_t auth_get(httpd_req_t* req) {
+    const bool set = auth::password_set();
+    const bool in = set && auth::valid(session_of(req));
+    std::string rp;
+    std::string j = std::string("{\"password_set\":") + (set ? "true" : "false") + ",\"signed_in\":" + (in ? "true" : "false") +
+                    ",\"via_hotspot\":" + (from_hotspot(req) ? "true" : "false") +
+                    ",\"https\":" + (secure(req) ? "true" : "false") + ",\"https_available\":" + (g_https ? "true" : "false") +
+                    ",\"passkey_ready\":" + (passkey_host(req, rp) ? "true" : "false") +
+                    ",\"passkeys\":" + std::to_string(auth::passkeys().size()) +
+                    ",\"hostname\":\"" + (g_hooks.hostname ? json_escape(g_hooks.hostname()) : std::string()) + "\"}";
+    return send_json(req, j);
+}
+
+esp_err_t login_post(httpd_req_t* req) {
+    std::string body;
+    if (!read_form(req, body)) return result(req, false, "Bad request", "400 Bad Request");
+    if (!auth::password_set()) return result(req, false, "Choose a password first");
+    std::string token;
+    switch (auth::login(field(body, "password"), token)) {
+        case auth::Login::Ok:
+            set_session_cookie(req, token);
+            return result(req, true, "Signed in");
+        case auth::Login::Locked:
+            return result(req, false, "Too many wrong passwords. Try again in 30 seconds.", "429 Too Many Requests");
+        default:
+            return result(req, false, "Wrong password", "401 Unauthorized");
+    }
+}
+
+esp_err_t logout_post(httpd_req_t* req) {
+    auth::end(session_of(req));
+    set_session_cookie(req, "");
+    return result(req, true, "Signed out");
 }
 
 esp_err_t status_get(httpd_req_t* req) {
+    if (!allowed(req, false)) return ESP_OK;
     std::string j = g_hooks.status_json ? g_hooks.status_json() : "{}";
     j.insert(1, std::string("\"via_hotspot\":") + (from_hotspot(req) ? "true" : "false") + (j.size() > 2 ? "," : ""));
     return send_json(req, j);
 }
 
-esp_err_t scan_get(httpd_req_t* req) {
+esp_err_t deck_get(httpd_req_t* req) {
+    if (!allowed(req, false)) return ESP_OK;
+    return send_json(req, g_hooks.deck_json ? g_hooks.deck_json() : "{}");
+}
+
+esp_err_t scan_work(httpd_req_t* req) {
     std::string out = "[";
     if (g_hooks.scan) {
         bool first = true;
@@ -138,41 +337,133 @@ esp_err_t scan_get(httpd_req_t* req) {
     return send_json(req, out);
 }
 
+esp_err_t brightness_post(httpd_req_t* req) {
+    if (!allowed(req, true)) return ESP_OK;
+    std::string body;
+    if (!read_form(req, body)) return result(req, false, "Bad request", "400 Bad Request");
+    const std::string v = field(body, "value");
+    char* end = nullptr;
+    const long n = std::strtol(v.c_str(), &end, 10);
+    if (v.empty() || *end || n < 0 || n > 100) return result(req, false, "Brightness is 0 to 100");
+    if (g_hooks.set_brightness) g_hooks.set_brightness(static_cast<int>(n));
+    return result(req, true, "Brightness " + std::to_string(n) + "%");
+}
+
+esp_err_t matter_get(httpd_req_t* req) {
+    if (!allowed(req, false)) return ESP_OK;
+    return send_json(req, g_hooks.matter_json ? g_hooks.matter_json() : "{\"running\":false}");
+}
+
+esp_err_t matter_open_post(httpd_req_t* req) {
+    if (!allowed(req, true)) return ESP_OK;
+    if (!g_hooks.matter_open || !g_hooks.matter_open()) return result(req, false, "Matter is not running");
+    return result(req, true, "Pairing is open for 15 minutes");
+}
+
 esp_err_t trace_get(httpd_req_t* req) {
+    if (!allowed(req, false)) return ESP_OK;
     const std::string t = g_hooks.trace ? g_hooks.trace() : "";
     httpd_resp_set_type(req, "text/plain; charset=utf-8");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, t.c_str(), static_cast<ssize_t>(t.size()));
 }
 
 esp_err_t key_get(httpd_req_t* req) {
-    char q[32], v[8];
+    if (!allowed(req, false)) return ESP_OK;
+    char q[48], v[8];
     int key = -1;
     if (httpd_req_get_url_query_str(req, q, sizeof(q)) == ESP_OK && httpd_query_key_value(q, "n", v, sizeof(v)) == ESP_OK)
         key = std::atoi(v);
     std::string type;
     auto img = g_hooks.key_image ? g_hooks.key_image(key, type) : std::vector<uint8_t>{};
     if (img.empty()) {
-        httpd_resp_set_status(req, "404 Not Found");
+        httpd_resp_set_status(req, "204 No Content");
         return httpd_resp_send(req, nullptr, 0);
     }
     httpd_resp_set_type(req, type.c_str());
-    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    // The page asks with ?v=<version>: a key's URL changes when its image does.
+    httpd_resp_set_hdr(req, "Cache-Control", "private, max-age=86400, immutable");
     return httpd_resp_send(req, reinterpret_cast<const char*>(img.data()), static_cast<ssize_t>(img.size()));
+}
+
+esp_err_t setup_work(httpd_req_t* req) {
+    std::string body;
+    if (!read_form(req, body)) return result(req, false, "Bad request", "400 Bad Request");
+    if (auth::password_set()) return result(req, false, "A password is set already: sign in");
+    const std::string pw = field(body, "password");
+    if (pw.size() < auth::kMinLength) return result(req, false, "Use at least 8 characters");
+    // Whoever sets the first password owns the dock, so it must be someone at the deck.
+    if (!confirmed(req, "Set the web password?")) return result(req, false, "Not confirmed on the deck");
+    if (!auth::set_password(pw)) return result(req, false, "Could not store the password");
+    set_session_cookie(req, auth::new_session());
+    return result(req, true, "Password set");
+}
+
+esp_err_t password_post(httpd_req_t* req) {
+    if (!allowed(req, true)) return ESP_OK;
+    std::string body;
+    if (!read_form(req, body)) return result(req, false, "Bad request", "400 Bad Request");
+    if (!auth::check_password(field(body, "current"))) return result(req, false, "The current password is wrong", "401 Unauthorized");
+    const std::string pw = field(body, "password");
+    if (pw.size() < auth::kMinLength) return result(req, false, "Use at least 8 characters");
+    if (!auth::set_password(pw)) return result(req, false, "Could not store the password");
+    set_session_cookie(req, auth::new_session());  // everyone else is signed out; this browser stays in
+    return result(req, true, "Password changed. Other browsers are signed out.");
 }
 
 esp_err_t wifi_work(httpd_req_t* req) {
     std::string body;
-    if (!read_form(req, body)) return result(req, false, "Bad request");
-    settings::Wifi w{field(body, "ssid"), field(body, "password")};
+    if (!read_form(req, body)) return result(req, false, "Bad request", "400 Bad Request");
+    settings::Wifi w;
+    w.enabled = true;
+    w.ssid = field(body, "ssid");
+    w.password = field(body, "password");
     if (w.ssid.empty()) return result(req, false, "Choose a network");
     if (!confirmed(req, "Join Wi-Fi '" + w.ssid + "'?")) return result(req, false, "Not confirmed on the deck");
     if (g_hooks.set_wifi) g_hooks.set_wifi(w);
     return result(req, true, "Joining " + w.ssid);
 }
 
+// Wi-Fi on or off. Off keeps the radio off, the setup hotspot too, so it is confirmed on the deck.
+esp_err_t wifi_enabled_work(httpd_req_t* req) {
+    std::string body;
+    if (!read_form(req, body)) return result(req, false, "Bad request", "400 Bad Request");
+    auto w = settings::wifi();
+    const bool on = field(body, "value") == "1";
+    if (on == w.enabled) return result(req, true, on ? "Wi-Fi is on" : "Wi-Fi is off");
+    if (!on && !confirmed(req, "Turn off Wi-Fi?")) return result(req, false, "Not confirmed on the deck");
+    w.enabled = on;
+    if (g_hooks.set_wifi) g_hooks.set_wifi(w);
+    return result(req, true, on ? "Wi-Fi is on" : "Wi-Fi is off");
+}
+
+esp_err_t wifi_forget_work(httpd_req_t* req) {
+    auto w = settings::wifi();
+    if (w.ssid.empty()) return result(req, true, "No saved network");
+    if (!confirmed(req, "Forget Wi-Fi '" + w.ssid + "'?")) return result(req, false, "Not confirmed on the deck");
+    const std::string was = w.ssid;
+    w.ssid.clear();
+    w.password.clear();
+    if (g_hooks.set_wifi) g_hooks.set_wifi(w);
+    return result(req, true, "Forgot " + was);
+}
+
+esp_err_t hostname_post(httpd_req_t* req) {
+    if (!allowed(req, true)) return ESP_OK;
+    std::string body;
+    if (!read_form(req, body)) return result(req, false, "Bad request", "400 Bad Request");
+    std::string h = field(body, "value");
+    for (char& c : h) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (h.size() > 6 && h.compare(h.size() - 6, 6, ".local") == 0) h.resize(h.size() - 6);
+    if (!h.empty() && !settings::valid_hostname(h))
+        return result(req, false, "Use letters, digits and hyphens (not at the start or end), at most 63");
+    if (g_hooks.set_hostname) g_hooks.set_hostname(h);
+    return result(req, true, h.empty() ? "Hostname back to the default" : "Hostname " + h + ".local");
+}
+
 esp_err_t network_work(httpd_req_t* req) {
     std::string body;
-    if (!read_form(req, body)) return result(req, false, "Bad request");
+    if (!read_form(req, body)) return result(req, false, "Bad request", "400 Bad Request");
     settings::Network n;
     n.dhcp = field(body, "mode") != "static";
     if (!n.dhcp) {
@@ -191,6 +482,18 @@ esp_err_t network_work(httpd_req_t* req) {
 void restart_soon(void*) {
     vTaskDelay(pdMS_TO_TICKS(1500));
     esp_restart();
+}
+
+esp_err_t matter_off_work(httpd_req_t* req) {
+    if (!confirmed(req, "Turn off Matter?")) return result(req, false, "Not confirmed on the deck");
+    if (!g_hooks.matter_off || !g_hooks.matter_off()) return result(req, false, "Could not turn Matter off");
+    return result(req, true, "Matter is off: the dock left every controller and restarts");
+}
+
+esp_err_t matter_setup_post(httpd_req_t* req) {
+    if (!allowed(req, true)) return ESP_OK;
+    if (!g_hooks.matter_setup || !g_hooks.matter_setup()) return result(req, false, "Matter did not start: the serial log says why");
+    return result(req, true, "Matter is on: add the dock to a controller now");
 }
 
 // The image is written to the spare slot first; only after it validates and is confirmed on the deck
@@ -212,7 +515,7 @@ esp_err_t update_work(httpd_req_t* req) {
         }
         left -= static_cast<size_t>(n);
     }
-    if (esp_ota_end(ota) != ESP_OK) return result(req, false, "Not a valid Deck32 firmware image");
+    if (esp_ota_end(ota) != ESP_OK) return result(req, false, "Not a valid NetworkDeck firmware image");
     esp_app_desc_t desc{};
     esp_ota_get_partition_description(slot, &desc);
     if (std::strcmp(desc.project_name, esp_app_get_description()->project_name) != 0)
@@ -252,35 +555,104 @@ esp_err_t run_async(httpd_req_t* req, esp_err_t (*work)(httpd_req_t*)) {
     return ESP_OK;
 }
 
-esp_err_t wifi_post(httpd_req_t* req) { return run_async(req, wifi_work); }
-esp_err_t network_post(httpd_req_t* req) { return run_async(req, network_work); }
-esp_err_t update_post(httpd_req_t* req) { return run_async(req, update_work); }
+esp_err_t setup_post(httpd_req_t* req) {
+    char v[8];
+    if (httpd_req_get_hdr_value_str(req, "X-NetworkDeck", v, sizeof(v)) != ESP_OK)
+        return result(req, false, "Missing X-NetworkDeck header", "403 Forbidden");
+    return run_async(req, setup_work);
+}
+// A scan takes a few seconds: on the worker, so the status and deck polls keep answering meanwhile.
+esp_err_t scan_get(httpd_req_t* req) { return allowed(req, false) ? run_async(req, scan_work) : ESP_OK; }
+esp_err_t matter_off_post(httpd_req_t* req) { return allowed(req, true) ? run_async(req, matter_off_work) : ESP_OK; }
+esp_err_t wifi_enabled_post(httpd_req_t* req) { return allowed(req, true) ? run_async(req, wifi_enabled_work) : ESP_OK; }
+esp_err_t wifi_forget_post(httpd_req_t* req) { return allowed(req, true) ? run_async(req, wifi_forget_work) : ESP_OK; }
+esp_err_t wifi_post(httpd_req_t* req) { return allowed(req, true) ? run_async(req, wifi_work) : ESP_OK; }
+esp_err_t network_post(httpd_req_t* req) { return allowed(req, true) ? run_async(req, network_work) : ESP_OK; }
+esp_err_t update_post(httpd_req_t* req) { return allowed(req, true) ? run_async(req, update_work) : ESP_OK; }
 
 }  // namespace
 
 esp_err_t start(const Hooks& hooks) {
     g_hooks = hooks;
+    auth::load();
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.stack_size = 8192;
-    cfg.max_uri_handlers = 12;
+    cfg.max_uri_handlers = 32;
+    cfg.max_open_sockets = 7;
     cfg.recv_wait_timeout = 40;  // a confirmation on the deck can take up to 30 s
     cfg.send_wait_timeout = 40;
     cfg.lru_purge_enable = true;
+
+    // HTTPS on 443 with the dock's own certificate (its authority is at /ca.pem), for passkeys and a
+    // padlock; plain HTTP stays on 80 so the dock is reachable before the authority is trusted.
+    httpd_handle_t secure = nullptr;
+    tls_identity_t id{};
+    if (tls_identity_get(&id, false) == ESP_OK) {
+        if (id.ca_pem) g_ca_pem = id.ca_pem;
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wmissing-field-initializers"  // IDF's macro, written for C
+        httpd_ssl_config_t ssl = HTTPD_SSL_CONFIG_DEFAULT();
+#pragma GCC diagnostic pop
+        ssl.httpd = cfg;
+        ssl.httpd.ctrl_port = cfg.ctrl_port + 1;
+        ssl.httpd.max_open_sockets = 5;
+        ssl.port_secure = 443;
+        ssl.servercert = reinterpret_cast<const unsigned char*>(id.cert_pem);
+        ssl.servercert_len = id.cert_len;
+        ssl.prvtkey_pem = reinterpret_cast<const unsigned char*>(id.key_pem);
+        ssl.prvtkey_len = id.key_len;
+        ssl.transport_mode = HTTPD_SSL_TRANSPORT_SECURE;
+        ssl.session_tickets = true;  // a full handshake costs ~300 ms; the page opens several connections
+        if (httpd_ssl_start(&secure, &ssl) == ESP_OK) g_https = true;
+        else ESP_LOGE(TAG, "HTTPS did not start");
+        tls_identity_free(&id);  // esp_https_server keeps its own copies
+    } else {
+        ESP_LOGE(TAG, "no TLS identity: HTTPS is off");
+    }
+
     httpd_handle_t server = nullptr;
     esp_err_t err = httpd_start(&server, &cfg);
     if (err != ESP_OK) return err;
     const httpd_uri_t uris[] = {
         {"/", HTTP_GET, index_get, nullptr},
+        {"/ca.pem", HTTP_GET, ca_get, nullptr},
+        {"/api/auth", HTTP_GET, auth_get, nullptr},
+        {"/api/setup", HTTP_POST, setup_post, nullptr},
+        {"/api/login", HTTP_POST, login_post, nullptr},
+        {"/api/logout", HTTP_POST, logout_post, nullptr},
+        {"/api/password", HTTP_POST, password_post, nullptr},
         {"/api/status", HTTP_GET, status_get, nullptr},
+        {"/api/deck", HTTP_GET, deck_get, nullptr},
+        {"/api/key", HTTP_GET, key_get, nullptr},
         {"/api/scan", HTTP_GET, scan_get, nullptr},
         {"/api/wifi", HTTP_POST, wifi_post, nullptr},
         {"/api/network", HTTP_POST, network_post, nullptr},
         {"/api/update", HTTP_POST, update_post, nullptr},
-        {"/trace", HTTP_GET, trace_get, nullptr},
-        {"/api/key", HTTP_GET, key_get, nullptr},
+        {"/api/trace", HTTP_GET, trace_get, nullptr},
+        {"/api/deck/brightness", HTTP_POST, brightness_post, nullptr},
+        {"/api/matter", HTTP_GET, matter_get, nullptr},
+        {"/api/matter/open", HTTP_POST, matter_open_post, nullptr},
+        {"/api/matter/setup", HTTP_POST, matter_setup_post, nullptr},
+        {"/api/matter/off", HTTP_POST, matter_off_post, nullptr},
+        {"/api/wifi/enabled", HTTP_POST, wifi_enabled_post, nullptr},
+        {"/api/wifi/forget", HTTP_POST, wifi_forget_post, nullptr},
+        {"/api/hostname", HTTP_POST, hostname_post, nullptr},
+        {"/api/passkeys", HTTP_GET, passkeys_get, nullptr},
+        {"/api/passkey/register/options", HTTP_POST, passkey_register_options_post, nullptr},
+        {"/api/passkey/register", HTTP_POST, passkey_register_post, nullptr},
+        {"/api/passkey/delete", HTTP_POST, passkey_delete_post, nullptr},
+        {"/api/passkey/login/options", HTTP_POST, passkey_login_options_post, nullptr},
+        {"/api/passkey/login", HTTP_POST, passkey_login_post, nullptr},
     };
-    for (const auto& u : uris) httpd_register_uri_handler(server, &u);
-    ESP_LOGI(TAG, "web interface on port 80");
+    for (const auto& u : uris) {
+        httpd_register_uri_handler(server, &u);
+        if (secure) {
+            httpd_uri_t s = u;
+            s.user_ctx = const_cast<char*>(kSecure);  // the handler can tell it came over HTTPS
+            httpd_register_uri_handler(secure, &s);
+        }
+    }
+    ESP_LOGI(TAG, "web interface on port 80%s", g_https ? " and 443 (HTTPS)" : "");
     return ESP_OK;
 }
 

@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <string>
+#include <utility>
 
 #include "deck_ui/canvas.hpp"
 #include "deck_ui/model.hpp"
@@ -18,6 +19,8 @@ struct NetInfo {
     std::string ip;                 // empty while there is no address
     std::string firmware;
     bool dhcp = true;
+    bool wifi_on = true;            // the Wi-Fi setting
+    std::string wifi_ssid;          // the saved network, empty if none
     Ip4 ip4{192, 168, 1, 50}, mask{255, 255, 255, 0}, gateway{192, 168, 1, 1};  // static settings
 };
 
@@ -27,7 +30,8 @@ struct Hotspot {
 };
 
 struct UiEvent {
-    enum class Kind { None, SetDhcp, SetStatic, PromptAnswer, FactoryReset };
+    // OpenHotspot/CloseHotspot: the Wi-Fi setup page opened or left. SetWifi: Wi-Fi on (yes) or off.
+    enum class Kind { None, SetDhcp, SetStatic, PromptAnswer, FactoryReset, OpenHotspot, CloseHotspot, SetWifi };
     Kind kind = Kind::None;
     Ip4 ip{}, mask{}, gateway{};
     uint32_t prompt_id = 0;
@@ -56,9 +60,19 @@ public:
     // Holding the two top corner keys this long asks for a factory reset.
     static constexpr uint32_t kResetHoldMs = 10000;
 
+public:
+    // Network: the Elgato-style start page. Setup: Ethernet or Wi-Fi. Then their pages, and the
+    // static address editor.
+    enum class Page { Network, Setup, Ethernet, Wifi, Editor };
+    Page page() const { return page_; }
+
 private:
-    enum class Page { Network, Editor };
-    enum class Role { Blank, Ip, Link, Firmware, Mode, Field, Octet, Up, Down, Ok, Cancel };
+    enum class Role {
+        Blank, IpLabel, IpHead, IpTail, Firmware, Mode, Setup,
+        Back, PickEthernet, PickWifi, EthStatus, WifiStatus, StaticIp, Address,
+        WifiToggle, SavedNetwork, Qr, HotspotName, HotspotPassword, HotspotUrl,
+        Field, Octet, Up, Down, Ok, Cancel
+    };
     struct Slot {
         Role role = Role::Blank;
         int arg = 0;  // octet index for Role::Octet
@@ -69,11 +83,15 @@ private:
     Ip4& field();
     void step(int delta);
     UiEvent press(const Slot& s, uint32_t now);
+    void open_editor();
+    void go(Page p);
+    int at(int row, int col) const { return row * m_.cols + col; }
 
     const Model& m_;
     NetInfo net_;
     Hotspot hotspot_;
     Page page_ = Page::Network;
+    Page editor_back_ = Page::Network;  // where ✕ or the last ✓ in the editor goes
     int field_ = 0;   // 0 ip, 1 mask, 2 gateway
     int octet_ = 0;
     Ip4 edit_[3]{};
@@ -92,5 +110,9 @@ private:
 };
 
 std::string ip_to_string(const Ip4& ip);
+
+// An address over two keys, as the Elgato dock shows it: "10.0." and "1.187" (split after the second
+// dot). Both empty for an empty address.
+std::pair<std::string, std::string> ip_parts(const std::string& ip);
 
 }  // namespace deck_ui

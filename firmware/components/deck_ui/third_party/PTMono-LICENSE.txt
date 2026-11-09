@@ -1,0 +1,11 @@
+PT Mono (the Regular face), rendered into src/font_mono_data.cpp by tools/fontgen/fontgen.py.
+
+Copyright © 2010 ParaType Inc., ParaType Ltd. All rights reserved.
+
+License, as carried in the font itself (name table, license description):
+
+  ParaType Ltd grants you the right to use, copy, modify this font and distribute modified and
+  unmodified copies of the font by any means, including placing on Web servers for free downloading,
+  embedding in documents and Web pages, bundling with commercial and non commercial products, if it
+  does not conflict with the ParaType Free Font License placed on
+  www.paratype.com/public/pt_openlicense_eng.asp

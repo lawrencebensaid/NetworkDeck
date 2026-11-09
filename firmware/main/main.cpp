@@ -3,6 +3,7 @@
 // Wiring only: usb_bridge (the deck) <-> dock_server (the Stream Deck app) while a host is connected,
 // deck_ui (the dock's own screens) otherwise; net, settings, web and OTA around them.
 
+#include <cctype>
 #include <cstdio>
 #include <string>
 
@@ -12,19 +13,21 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
+#include "matter.hpp"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 #include "freertos/task.h"
 #include "net.hpp"
 #include "nvs_flash.h"
 #include "settings.hpp"
+#include "tls.h"
 #include "usb_bridge.hpp"
 #include "web.hpp"
 
 namespace {
 
 constexpr char TAG[] = "deck32";
-constexpr char kFirmware[] = "1.00.000";  // what the dock reports to the Stream Deck app
+constexpr char kFirmware[] = "1.01.017";  // what the dock reports to the Stream Deck app (the Elgato dock's latest)
 
 std::string g_name, g_serial;
 QueueHandle_t g_actions = nullptr;  // deck_ui events handled off the deck_ui task (they may prompt)
@@ -43,6 +46,8 @@ deck_ui::Ip4 to_ui(const settings::Ip4& ip) { return {ip[0], ip[1], ip[2], ip[3]
 settings::Ip4 from_ui(const deck_ui::Ip4& ip) { return {ip[0], ip[1], ip[2], ip[3]}; }
 
 void publish_net(const net::Status& s) {
+    // A DHCP address is named in the HTTPS certificate from the next start (static ones always are).
+    if (s.link == net::Link::Ethernet || s.link == net::Link::Wifi) tls_set_ip4(s.ip.c_str());
     {
         unsigned a = 0, b = 0, c = 0, d = 0;
         std::array<uint8_t, 4> ip{};
@@ -60,9 +65,11 @@ void publish_net(const net::Status& s) {
     n.ip4 = to_ui(cfg.ip);
     n.mask = to_ui(cfg.mask);
     n.gateway = to_ui(cfg.gateway);
+    n.wifi_on = s.wifi_enabled;
+    n.wifi_ssid = s.wifi_ssid;
     deck_ui::set_net(n);
     deck_ui::Hotspot h;
-    h.active = s.link == net::Link::Hotspot;
+    h.active = !s.hotspot_ssid.empty();
     h.ssid = s.hotspot_ssid;
     h.password = s.hotspot_password;
     h.url = s.hotspot_ip;
@@ -105,10 +112,23 @@ void actions_task(void*) {
                 apply_network(n);
                 break;
             }
+            case deck_ui::UiEvent::Kind::OpenHotspot:
+            case deck_ui::UiEvent::Kind::CloseHotspot:
+                net::open_hotspot(ev.kind == deck_ui::UiEvent::Kind::OpenHotspot);
+                break;
+            case deck_ui::UiEvent::Kind::SetWifi: {
+                // On the deck itself: no confirmation needed (and the way back if Wi-Fi was turned off).
+                auto w = settings::wifi();
+                w.enabled = ev.yes;
+                settings::set_wifi(w);
+                net::join(w);
+                break;
+            }
             case deck_ui::UiEvent::Kind::FactoryReset:
                 if (ask("Factory reset?")) {
                     settings::factory_reset();
                     vTaskDelay(pdMS_TO_TICKS(300));
+                    matter::unpair();  // Matter's own storage goes too, and it leaves every controller
                     esp_restart();
                 }
                 break;
@@ -116,6 +136,29 @@ void actions_task(void*) {
                 break;
         }
     }
+}
+
+std::string json_escape(const std::string& in) {
+    std::string o;
+    for (char c : in) {
+        if (c == '"' || c == '\\') o += '\\';
+        if (static_cast<unsigned char>(c) >= 0x20) o += c;
+    }
+    return o;
+}
+
+// The hostname: the one set in the web interface, or the dock's name in lower case (deck32-204c).
+std::string hostname() {
+    std::string h = settings::hostname();
+    if (!h.empty()) return h;
+    for (char c : g_name) h.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    return h;
+}
+
+unsigned deck_keys() {
+    if (!usb_bridge::attached()) return 15;
+    const auto* m = deck_ui::find_model(usb_bridge::info().pid);
+    return m ? static_cast<unsigned>(m->keys()) : 15;
 }
 
 std::string status_json() {
@@ -137,15 +180,49 @@ std::string status_json() {
     j += ",\"build\":\"" + std::string(esp_app_get_description()->version) + "\"";
     j += ",\"link\":\"" + std::string(net::link_name(s.link)) + "\",\"ip\":\"" + s.ip + "\"";
     j += ",\"wifi_available\":" + std::string(s.wifi_available ? "true" : "false");
-    j += ",\"wifi_ssid\":\"" + s.wifi_ssid + "\"";
+    j += ",\"wifi_enabled\":" + std::string(s.wifi_enabled ? "true" : "false");
+    j += ",\"wifi_ssid\":\"" + json_escape(s.wifi_ssid) + "\"";
+    j += ",\"wifi_rssi\":" + std::to_string(net::wifi_rssi());
+    j += ",\"hostname\":\"" + net::hostname() + "\"";
     j += ",\"dhcp\":" + std::string(cfg.dhcp ? "true" : "false");
     j += ",\"static_ip\":\"" + ip(cfg.ip) + "\",\"static_mask\":\"" + ip(cfg.mask) + "\",\"static_gateway\":\"" + ip(cfg.gateway) + "\"";
     j += ",\"host\":" + std::string(dock_server::host_connected() ? "true" : "false");
+    {
+        const auto h = dock_server::host();
+        j += ",\"host_ip\":\"" + h.ip + "\",\"host_seconds\":" + std::to_string(h.seconds);
+    }
     j += ",\"deck\":\"" + std::string(deck_name) + "\"}";
     return j;
 }
 
+std::string matter_json() {
+    const auto m = matter::status();
+    std::string j = "{\"enabled\":" + std::string(settings::matter_enabled() ? "true" : "false");
+    j += ",\"running\":" + std::string(m.running ? "true" : "false");
+    j += ",\"fabrics\":" + std::to_string(m.fabrics);
+    j += ",\"window_open\":" + std::string(m.window_open ? "true" : "false");
+    j += ",\"window_seconds\":" + std::to_string(m.window_seconds);
+    j += ",\"qr\":\"" + m.qr + "\",\"manual\":\"" + m.manual + "\"}";  // base38 and digits: nothing to escape
+    return j;
+}
+
+// Leaving every controller restarts the dock: give the web reply a moment to go out first.
+void matter_off_task(void*) {
+    vTaskDelay(pdMS_TO_TICKS(500));
+    matter::unpair();
+    esp_restart();
+}
+
 }  // namespace
+
+// What the HTTPS certificate names (components/tls): the hostname, and the static address if any.
+extern "C" void tls_host_hostname(char* out, size_t len) { std::snprintf(out, len, "%s", hostname().c_str()); }
+extern "C" bool tls_host_static_ip(char* out, size_t len) {
+    const auto n = settings::network();
+    if (n.dhcp) return false;
+    std::snprintf(out, len, "%u.%u.%u.%u", n.ip[0], n.ip[1], n.ip[2], n.ip[3]);
+    return true;
+}
 
 extern "C" void app_main(void) {
     esp_err_t err = nvs_flash_init();
@@ -172,9 +249,12 @@ extern "C" void app_main(void) {
     deck_ui::Callbacks ui_cb;
     ui_cb.on_event = [](const deck_ui::UiEvent& ev) { xQueueSend(g_actions, &ev, 0); };
     ui_cb.on_replug = [] { dock_server::replug(); };
+    ui_cb.on_key = [](int key, bool down) { matter::key(static_cast<unsigned>(key), down); };
     deck_ui::start(ui_cb);
+    deck_ui::set_brightness(settings::deck_brightness());
 
     ESP_ERROR_CHECK(net::start(g_name, publish_net));
+    net::set_hostname(hostname());
     publish_net(net::status());
 
     dock_server::Config config;
@@ -183,12 +263,15 @@ extern "C" void app_main(void) {
         ESP_LOGI(TAG, "host %s", connected ? "connected" : "disconnected");
         deck_ui::set_host(connected);
     };
+    config.on_host_output = deck_ui::host_output;
+    config.on_host_feature = deck_ui::host_feature;
     dock_server::start(config);
 
     usb_bridge::Callbacks cb;
     cb.on_attach = [](const usb_bridge::DeckInfo& info) {
         dock_server::deck_attached(info);
         deck_ui::deck_attached(info.pid);
+        if (const auto* m = deck_ui::find_model(info.pid)) matter::remember_keys(static_cast<unsigned>(m->keys()));
     };
     cb.on_detach = [] {
         ESP_LOGI(TAG, "deck unplugged");
@@ -196,6 +279,7 @@ extern "C" void app_main(void) {
         dock_server::deck_detached();
     };
     cb.on_input = [](const uint8_t* report, size_t len) {
+        deck_ui::observe_input(report, len);
         if (deck_ui::owns_deck()) {
             deck_ui::input(report, len);
         } else {
@@ -206,8 +290,16 @@ extern "C" void app_main(void) {
 
     ESP_ERROR_CHECK(net::start_mdns(g_name, identity.serial, cora::kDockPort));
 
+    // Matter (Home Assistant, Apple Home): off until it is set up in the web interface. A dock that
+    // ran Matter before it was opt-in has a setup code: it keeps running it.
+    if (!settings::matter_enabled() && matter::has_setup_code()) settings::set_matter_enabled(true);
+    if (settings::matter_enabled())
+        if (esp_err_t err = matter::start(deck_keys(), g_name); err != ESP_OK) ESP_LOGE(TAG, "Matter did not start: %s", esp_err_to_name(err));
+
     web::Hooks hooks;
     hooks.status_json = status_json;
+    hooks.hostname = [] { return net::hostname(); };
+    hooks.deck_json = deck_ui::deck_json;
     hooks.scan = [] {
         std::vector<web::Network> out;
         for (const auto& r : net::scan()) out.push_back({r.ssid, r.rssi, r.secure});
@@ -221,6 +313,27 @@ extern "C" void app_main(void) {
         net::join(w);
     };
     hooks.set_network = apply_network;
+    hooks.set_brightness = [](int percent) {
+        settings::set_deck_brightness(percent);
+        deck_ui::set_brightness(percent);
+    };
+    hooks.matter_json = matter_json;
+    hooks.matter_open = [] { return matter::open_window() == ESP_OK; };
+    hooks.matter_setup = [] {
+        settings::set_matter_enabled(true);
+        if (matter::status().running) return true;
+        const esp_err_t err = matter::start(deck_keys(), g_name);
+        if (err != ESP_OK) ESP_LOGE(TAG, "Matter did not start: %s", esp_err_to_name(err));
+        return err == ESP_OK;
+    };
+    hooks.matter_off = [] {
+        settings::set_matter_enabled(false);
+        return xTaskCreate(matter_off_task, "matter_off", 8192, nullptr, 5, nullptr) == pdPASS;
+    };
+    hooks.set_hostname = [](const std::string& h) {
+        settings::set_hostname(h);
+        net::set_hostname(h.empty() ? hostname() : h);
+    };
     ESP_ERROR_CHECK(web::start(hooks));
 
     // The new image started its network and services: keep it (otherwise the bootloader rolls back).
