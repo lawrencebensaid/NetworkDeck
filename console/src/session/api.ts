@@ -22,7 +22,10 @@ export interface Status {
   link: string;
   ip: string;
   wifi_available: boolean;
-  wifi_ssid: string;
+  wifi_enabled: boolean;
+  wifi_ssid: string; /* the saved network */
+  wifi_rssi: number; /* dBm while joined, else 0 */
+  hostname: string; /* without .local */
   dhcp: boolean;
   static_ip: string;
   static_mask: string;
@@ -59,6 +62,7 @@ export interface WifiNetwork {
 }
 
 export interface Matter {
+  enabled?: boolean; /* set up; it runs from now on */
   running: boolean;
   fabrics?: number; /* controllers it has been added to */
   window_open?: boolean; /* a controller can add it now */
@@ -108,8 +112,12 @@ export const api = {
   scan: () => get<WifiNetwork[]>("/api/scan"),
   brightness: (percent: number) => post("/api/deck/brightness", { value: String(percent) }),
   matter: () => get<Matter>("/api/matter"),
+  matterSetup: () => post("/api/matter/setup"),
   matterOpen: () => post("/api/matter/open"),
-  matterUnpair: () => post("/api/matter/unpair"),
+  matterOff: () => post("/api/matter/off"),
+  wifiEnabled: (on: boolean) => post("/api/wifi/enabled", { value: on ? "1" : "0" }),
+  wifiForget: () => post("/api/wifi/forget"),
+  hostname: (value: string) => post("/api/hostname", { value }),
   trace: async () => {
     const r = await fetch("/api/trace", { credentials: "same-origin", cache: "no-store" });
     if (r.status === 401) {

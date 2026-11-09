@@ -28,5 +28,6 @@ struct Font {
 extern const Font kSmallFont;   // 11 px: labels
 extern const Font kMediumFont;  // 14 px: values
 extern const Font kLargeFont;   // 20 px: big words ("DHCP")
+extern const Font kMonoFont;    // 13 px PT Mono: the info keys ("IP", "Firmware"), as on the Elgato dock
 
 }  // namespace deck_ui

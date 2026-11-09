@@ -1,7 +1,8 @@
 <script setup lang="ts">
 /*
- * Matter: adding the dock to Home Assistant, Apple Home or Google Home. The QR code shows while pairing
- * is open; every key becomes a button there. Leaving every controller is confirmed here and on the deck.
+ * Matter: adding the dock to Home Assistant, Apple Home or Google Home. It is off until it is set up
+ * here. The QR code shows while pairing is open; every key becomes a button there. Turning it off
+ * leaves every controller and is confirmed here and on the deck.
  */
 import { computed, onBeforeUnmount, onMounted, ref } from "vue"
 import { encode } from "uqr"
@@ -25,7 +26,7 @@ import { api, type Matter } from "../session/api.ts"
 import { store } from "../session/store.ts"
 
 const m = ref<Matter | null>(null)
-const busy = ref<"" | "open" | "unpair">("")
+const busy = ref<"" | "setup" | "open" | "off">("")
 let timer = 0
 
 async function load() {
@@ -71,9 +72,18 @@ async function openPairing() {
   await load()
 }
 
-async function unpair() {
-  busy.value = "unpair"
-  const r = await api.matterUnpair()
+async function setup() {
+  busy.value = "setup"
+  const r = await api.matterSetup()
+  busy.value = ""
+  if (r.ok) toast.success(r.message)
+  else toast.error(r.message)
+  await load()
+}
+
+async function turnOff() {
+  busy.value = "off"
+  const r = await api.matterOff()
   if (r.ok) {
     toast.success(r.message)
     setTimeout(() => location.reload(), 12000)
@@ -86,7 +96,15 @@ async function unpair() {
 
 <template>
   <div v-if="!m" class="flex items-center gap-2 text-sm text-muted-foreground"><Spinner class="size-4" /> Loading…</div>
-  <p v-else-if="!m.running" class="text-sm text-muted-foreground">Matter is not running on this dock. The serial log says why.</p>
+  <div v-else-if="!m.running" class="flex flex-col gap-4" data-testid="matter-off">
+    <p class="text-sm text-muted-foreground">
+      Matter makes every key of the deck a button in Home Assistant, Apple Home or Google Home, for automations: a
+      key that turns on the lights, say. It is a different way to use the deck than the Stream Deck app's profiles,
+      and both work at once. Matter is off until you set it up.
+    </p>
+    <p v-if="m.enabled" class="text-sm text-status-error-text">Matter is set up but did not start. The serial log says why.</p>
+    <Button :disabled="busy !== ''" data-testid="matter-setup" @click="setup"><Spinner v-if="busy === 'setup'" class="size-4" /> Set up Matter</Button>
+  </div>
   <div v-else class="flex flex-col gap-5">
     <div class="flex items-center justify-between gap-3">
       <span class="text-sm">{{ controllers }}</span>
@@ -124,26 +142,26 @@ async function unpair() {
       <Button :disabled="busy !== ''" @click="openPairing"><Spinner v-if="busy === 'open'" class="size-4" /> Open pairing</Button>
     </template>
 
-    <div v-if="(m.fabrics ?? 0) > 0" class="flex flex-col gap-2 border-t pt-4">
+    <div class="flex flex-col gap-2 border-t pt-4">
       <AlertDialog>
         <AlertDialogTrigger as-child>
-          <Button variant="destructive" :disabled="busy !== ''"><Spinner v-if="busy === 'unpair'" class="size-4" /> Remove from all controllers</Button>
+          <Button variant="destructive" :disabled="busy !== ''" data-testid="matter-turn-off"><Spinner v-if="busy === 'off'" class="size-4" /> Turn off Matter</Button>
         </AlertDialogTrigger>
         <AlertDialogContent>
           <AlertDialogHeader>
-            <AlertDialogTitle>Remove from all controllers?</AlertDialogTitle>
+            <AlertDialogTitle>Turn off Matter?</AlertDialogTitle>
             <AlertDialogDescription>
-              The dock leaves every Matter controller it was added to and restarts. Automations that use its keys stop
-              working until you add it again.
+              The dock leaves every Matter controller it was added to, forgets its setup code and restarts. Automations
+              that use its keys stop working until you set Matter up and add it again.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
             <AlertDialogCancel>Cancel</AlertDialogCancel>
-            <AlertDialogAction @click="unpair">Remove</AlertDialogAction>
+            <AlertDialogAction @click="turnOff">Turn off</AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-      <p v-if="busy === 'unpair' && !store.viaHotspot" class="flex items-center gap-2 text-sm" role="status"><Spinner class="size-4" /> Confirm on the Stream Deck: press ✓.</p>
+      <p v-if="busy === 'off' && !store.viaHotspot" class="flex items-center gap-2 text-sm" role="status"><Spinner class="size-4" /> Confirm on the Stream Deck: press ✓.</p>
     </div>
   </div>
 </template>

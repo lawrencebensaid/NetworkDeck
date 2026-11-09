@@ -300,7 +300,22 @@ esp_err_t open_window() {
     return windows.OpenBasicCommissioningWindow(chip::System::Clock::Seconds32(kWindowSeconds)) == CHIP_NO_ERROR ? ESP_OK : ESP_FAIL;
 }
 
+bool has_setup_code() {
+    nvs_handle_t h;
+    if (nvs_open(kNvsNamespace, NVS_READONLY, &h) != ESP_OK) return false;
+    uint32_t pin = 0;
+    const bool have = nvs_get_u32(h, "pin", &pin) == ESP_OK;
+    nvs_close(h);
+    return have;
+}
+
 esp_err_t unpair() {
+    nvs_handle_t h;
+    if (nvs_open(kNvsNamespace, NVS_READWRITE, &h) == ESP_OK) {  // a new code the next time it is set up
+        nvs_erase_all(h);
+        nvs_commit(h);
+        nvs_close(h);
+    }
     if (!g_running) return ESP_ERR_INVALID_STATE;
     return esp_matter::factory_reset();  // Matter's own storage only; restarts
 }

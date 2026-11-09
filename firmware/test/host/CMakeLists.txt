@@ -34,6 +34,7 @@ target_link_libraries(deck32_tests PRIVATE doctest::doctest deck_ui_core)
 add_library(deck_ui_core STATIC
   ${COMP}/deck_ui/src/canvas.cpp
   ${COMP}/deck_ui/src/font_data.cpp
+  ${COMP}/deck_ui/src/font_mono_data.cpp
   ${COMP}/deck_ui/src/model.cpp
   ${COMP}/deck_ui/src/ui.cpp
   ${COMP}/deck_ui/third_party/qrcodegen.c)

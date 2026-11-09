@@ -4,9 +4,10 @@
  * light also says when the page stops hearing from the dock.
  */
 import { useIntervalFn } from "@vueuse/core"
-import { EthernetPort, Grid3x3, RadioTower, Unplug, Wifi, WifiOff } from "@lucide/vue"
+import { EthernetPort, RadioTower, Unplug, Wifi, WifiOff } from "@lucide/vue"
 import { computed, ref, type Component } from "vue"
 
+import DeckIcon from "../components/DeckIcon.vue"
 import { store } from "./store.ts"
 
 export type Tone = "on" | "attention" | "error" | "busy" | "off"
@@ -60,7 +61,7 @@ export function useLights() {
 
   const deck = computed<Light>(() => {
     const d = store.deck
-    const base = { id: "deck" as const, name: "Stream Deck", icon: Grid3x3 }
+    const base = { id: "deck" as const, name: "Stream Deck", icon: DeckIcon }
     if (!d) return { ...base, tone: "off", state: "Checking", tip: "Asking the dock about its deck." }
     if (!d.attached)
       return { ...base, icon: Unplug, tone: "off", state: "Not plugged in", tip: "Plug a Stream Deck into the dock's USB-A port." }

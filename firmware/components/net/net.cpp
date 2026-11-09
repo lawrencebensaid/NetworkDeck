@@ -32,6 +32,7 @@ std::mutex g_mutex;  // guards the state below
 Status g_status;
 std::function<void(const Status&)> g_on_change;
 std::string g_name;
+std::string g_hostname;  // mDNS and DHCP
 settings::Network g_cfg;
 settings::Wifi g_wifi_cfg;
 
@@ -96,6 +97,10 @@ std::string random_password() {
 bool wifi_init() {
     g_sta_netif = esp_netif_create_default_wifi_sta();
     g_ap_netif = esp_netif_create_default_wifi_ap();
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (!g_hostname.empty()) esp_netif_set_hostname(g_sta_netif, g_hostname.c_str());
+    }
     wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
     esp_err_t err = esp_wifi_init(&cfg);
     if (err != ESP_OK) {
@@ -223,7 +228,7 @@ void policy_locked(uint32_t boot) {
     const uint32_t t = now_ms();
     if (g_scanning) {
         // leave Wi-Fi as it is until the scan is done
-    } else if (g_eth_link) {
+    } else if (!g_wifi_cfg.enabled || g_eth_link) {
         wifi_mode(false, false);
     } else if (t - boot >= kEthWaitMs) {
         const bool have_wifi = !g_wifi_cfg.ssid.empty();
@@ -249,11 +254,12 @@ void policy_locked(uint32_t boot) {
         s.ip.clear();
     }
     s.wifi_ssid = g_wifi_cfg.ssid;
+    s.wifi_enabled = g_wifi_cfg.enabled;
     if (!g_ap_on) {
         s.hotspot_ssid.clear();
     }
     const bool changed = s.link != g_status.link || s.ip != g_status.ip || s.hotspot_ssid != g_status.hotspot_ssid ||
-                         s.wifi_ssid != g_status.wifi_ssid;
+                         s.wifi_ssid != g_status.wifi_ssid || s.wifi_enabled != g_status.wifi_enabled;
     const std::string keep_pw = g_status.hotspot_password;
     g_status = s;
     g_status.hotspot_password = keep_pw;
@@ -377,7 +383,7 @@ std::vector<ScanResult> scan() {
     std::vector<ScanResult> out;
     {
         std::lock_guard<std::mutex> lock(g_mutex);
-        if (!g_status.wifi_available) return out;
+        if (!g_status.wifi_available || !g_wifi_cfg.enabled) return out;
         g_scanning = true;
         if (!g_wifi_started) {
             esp_wifi_set_mode(WIFI_MODE_STA);
@@ -425,12 +431,32 @@ std::string ip() {
     return g_status.ip;
 }
 
+void set_hostname(const std::string& host) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    g_hostname = host;
+    if (g_eth_netif) esp_netif_set_hostname(g_eth_netif, host.c_str());
+    if (g_sta_netif) esp_netif_set_hostname(g_sta_netif, host.c_str());
+    mdns_hostname_set(host.c_str());  // before mdns_init it fails harmlessly; start_mdns sets it then
+}
+
+std::string hostname() {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return g_hostname;
+}
+
+int wifi_rssi() {
+    {
+        std::lock_guard<std::mutex> lock(g_mutex);
+        if (!g_sta_connected || g_eth_link) return 0;
+    }
+    wifi_ap_record_t ap{};
+    return esp_wifi_sta_get_ap_info(&ap) == ESP_OK ? ap.rssi : 0;
+}
+
 esp_err_t start_mdns(const std::string& name, const std::string& serial, uint16_t port) {
     esp_err_t err = mdns_init();
     if (err != ESP_OK) return err;
-    std::string host;
-    for (char c : name) host.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
-    mdns_hostname_set(host.c_str());
+    mdns_hostname_set(hostname().c_str());
     mdns_instance_name_set(name.c_str());
     mdns_txt_item_t txt[] = {
         {"dt", "215"},
