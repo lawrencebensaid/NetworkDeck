@@ -31,6 +31,14 @@ The dock's own screens on the deck, while no app is connected:
 
 ![On the deck: the start page, Setup, and joining Wi-Fi](docs/screenshots/deck-screens.png)
 
+## First setup without a cable
+
+With no Ethernet and no saved Wi-Fi the dock opens its own network, `NetworkDeck <chip>` (with a
+password shown on the deck when a Stream Deck is attached, open otherwise; the deck also shows a QR code
+for it). Join it from a phone or computer: the page "Sign in to network" opens by itself, and if it
+doesn't, browse to `http://192.168.4.1`. Choose your Wi-Fi there; the dock joins it and the hotspot
+closes. The dock's address then shows on the deck, and `http://<name>.local` reaches it.
+
 ## HTTPS and passkeys
 
 The dock serves its interface over HTTP and over HTTPS. For HTTPS it is its own certificate

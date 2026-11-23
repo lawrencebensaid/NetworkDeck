@@ -133,6 +133,18 @@ bool parse_ip(const std::string& s, settings::Ip4& out) {
     return true;
 }
 
+// Captive portal, HTTP half. The hotspot's DNS (net.cpp) sends every name to the dock, so the "is this network
+// online" checks of Android (/generate_204), iOS and macOS (/hotspot-detect.html), Windows (/connecttest.txt)
+// and Firefox end up here as unknown paths: sending them to the setup page makes the phone offer to sign in.
+// Unknown paths from anyone else stay a 404.
+esp_err_t not_found(httpd_req_t* req, httpd_err_code_t) {
+    if (!from_hotspot(req)) return httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, nullptr);
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "http://192.168.4.1/");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, nullptr, 0);
+}
+
 bool confirmed(httpd_req_t* req, const std::string& question) {
     if (from_hotspot(req)) return true;
     return g_hooks.confirm && g_hooks.confirm(question);
@@ -860,6 +872,7 @@ esp_err_t start(const Hooks& hooks) {
         {"/api/system", HTTP_POST, system_post, nullptr},
         {"/api/restart", HTTP_POST, restart_post, nullptr},
     };
+    httpd_register_err_handler(server, HTTPD_404_NOT_FOUND, not_found);  // HTTP only: a captive check is never HTTPS
     for (const auto& u : uris) {
         httpd_register_uri_handler(server, &u);
         if (secure) {
