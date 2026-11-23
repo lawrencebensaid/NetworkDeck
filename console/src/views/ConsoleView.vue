@@ -3,7 +3,7 @@
  * The console: the top bar with the dock's lights, the rail, a panel beside the deck when one is open,
  * the deck itself; the settings, the connectors and the log open over it as dialogs.
  */
-import { ref } from "vue"
+import { ref, watch } from "vue"
 
 import DeckStage from "../components/DeckStage.vue"
 import SidePanel from "../components/SidePanel.vue"
@@ -15,6 +15,7 @@ import SettingsDialog from "../dialogs/SettingsDialog.vue"
 import MatterPanel from "../panels/MatterPanel.vue"
 import NetworkDeckPanel from "../panels/NetworkDeckPanel.vue"
 import { PANELS, type PanelId } from "../panels/panels.ts"
+import { store } from "../session/store.ts"
 import StreamDeckPanel from "../panels/StreamDeckPanel.vue"
 
 const panel = ref<PanelId | null>(null)
@@ -24,6 +25,21 @@ const settingsOpen = ref(false)
 const settingsSection = ref("system")
 const connectorsOpen = ref(false)
 const logsOpen = ref(false)
+
+/*
+ * First setup: a dock reached over its own hotspot that has no Wi-Fi saved has one thing left to do,
+ * so land on the Wi-Fi list instead of an empty console. Once, on the first status.
+ */
+let landed = false
+watch(
+  () => store.status,
+  (st) => {
+    if (!st || landed) return
+    landed = true
+    if (st.link === "Hotspot" && !st.wifi_ssid && st.wifi_available) openSettings("wifi")
+  },
+  { immediate: true },
+)
 
 function toggle(id: PanelId) {
   panel.value = panel.value === id ? null : id

@@ -6,6 +6,15 @@ adds a line under "Unreleased"; the release that raises `VERSION` renames that s
 
 ## Unreleased
 
+### Fixed
+- Wi-Fi search found nothing while the setup hotspot was running, which is exactly when you need it.
+- A dock reached over its setup hotspot with no Wi-Fi saved opens on the Wi-Fi list after sign-in,
+  instead of an empty console.
+
+### Added
+- The setup hotspot is a captive portal: joining `NetworkDeck …` on a phone or computer now opens the dock's
+  page by itself ("Sign in to network"), instead of showing nothing. If it doesn't, open `http://192.168.4.1`.
+
 ## [0.2.0] - 2026-11-09
 
 ### Added

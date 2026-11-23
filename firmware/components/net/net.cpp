@@ -27,6 +27,7 @@ namespace net {
 namespace {
 
 constexpr char TAG[] = "net";
+constexpr char kHotspotIp[] = "192.168.4.1";  // the ESP-IDF soft-AP default
 constexpr uint32_t kEthWaitMs = 5000;      // at boot, before falling back to Wi-Fi
 constexpr uint32_t kWifiGiveUpMs = 20000;  // a saved network that won't connect: open the hotspot too
 constexpr uint32_t kRetryMs = 5000;        // after a failed attempt to join, before the next
@@ -120,9 +121,66 @@ void try_connect() {
     }
 }
 
+// Captive portal, DNS half: every name a hotspot client asks for resolves to the dock, so the phone's "is this
+// network online" check lands on the dock's web server (web.cpp redirects it to the setup page) and the phone
+// offers to sign in. AAAA gets an empty answer (clients then use the A record). Only 192.168.4.x is answered:
+// the socket also sees Ethernet and Wi-Fi traffic.
+void dns_task(void*) {
+    const int s = socket(AF_INET, SOCK_DGRAM, IPPROTO_IP);
+    sockaddr_in a{};
+    a.sin_family = AF_INET;
+    a.sin_port = htons(53);
+    a.sin_addr.s_addr = htonl(INADDR_ANY);
+    if (s < 0 || bind(s, reinterpret_cast<sockaddr*>(&a), sizeof(a)) != 0) {
+        ESP_LOGW(TAG, "captive DNS did not start");
+        if (s >= 0) close(s);
+        vTaskDelete(nullptr);
+        return;
+    }
+    const uint32_t answer = esp_ip4addr_aton(kHotspotIp);
+    uint8_t buf[300];
+    for (;;) {
+        sockaddr_in from{};
+        socklen_t fl = sizeof(from);
+        const int n = recvfrom(s, buf, sizeof(buf) - 16, 0, reinterpret_cast<sockaddr*>(&from), &fl);
+        const uint8_t* src = reinterpret_cast<const uint8_t*>(&from.sin_addr.s_addr);
+        if (n < 17 || src[0] != 192 || src[1] != 168 || src[2] != 4) continue;
+        if (buf[2] & 0x80) continue;                  // a response, not a query
+        if (buf[4] != 0 || buf[5] != 1) continue;     // exactly one question
+        int p = 12;                                   // end of the question: name, type, class
+        while (p < n && buf[p]) p += buf[p] + 1;
+        p += 5;
+        if (p > n) continue;
+        const uint16_t qtype = static_cast<uint16_t>(buf[p - 4] << 8 | buf[p - 3]);
+        buf[2] = 0x80 | (buf[2] & 0x01);              // response, recursion desired as asked
+        buf[3] = 0x80;                                // recursion available, no error
+        buf[6] = 0;
+        buf[7] = qtype == 1 ? 1 : 0;
+        buf[8] = buf[9] = buf[10] = buf[11] = 0;
+        int len = p;
+        if (qtype == 1) {
+            const uint8_t rr[] = {0xC0, 0x0C, 0, 1, 0, 1, 0, 0, 0, 30, 0, 4};  // name pointer, A, IN, 30 s, 4 bytes
+            std::memcpy(buf + len, rr, sizeof(rr));
+            len += sizeof(rr);
+            std::memcpy(buf + len, &answer, 4);
+            len += 4;
+        }
+        sendto(s, buf, len, 0, reinterpret_cast<sockaddr*>(&from), fl);
+    }
+}
+
 bool wifi_init() {
     g_sta_netif = esp_netif_create_default_wifi_sta();
     g_ap_netif = esp_netif_create_default_wifi_ap();
+    {
+        // The hotspot hands out its own address as the DNS server: dns_task() answers for it (captive portal).
+        esp_netif_dns_info_t dns{};
+        dns.ip.type = ESP_IPADDR_TYPE_V4;
+        dns.ip.u_addr.ip4.addr = esp_ip4addr_aton(kHotspotIp);
+        esp_netif_set_dns_info(g_ap_netif, ESP_NETIF_DNS_MAIN, &dns);
+        uint8_t offer_dns = 1;
+        esp_netif_dhcps_option(g_ap_netif, ESP_NETIF_OP_SET, ESP_NETIF_DOMAIN_NAME_SERVER, &offer_dns, sizeof(offer_dns));
+    }
     {
         std::lock_guard<std::mutex> lock(g_mutex);
         if (!g_hostname.empty()) esp_netif_set_hostname(g_sta_netif, g_hostname.c_str());
@@ -166,7 +224,7 @@ void configure_ap() {
     ac.ap.max_connection = 4;
     ac.ap.channel = 6;
     esp_wifi_set_config(WIFI_IF_AP, &ac);
-    g_status.hotspot_ip = "192.168.4.1";
+    g_status.hotspot_ip = kHotspotIp;
 }
 
 void wifi_mode(bool sta, bool ap) {
@@ -185,7 +243,10 @@ void wifi_mode(bool sta, bool ap) {
         g_sta_ip.clear();
         return;
     }
-    const wifi_mode_t mode = sta && ap ? WIFI_MODE_APSTA : sta ? WIFI_MODE_STA : WIFI_MODE_AP;
+    // The hotspot always runs with the (idle) station side: a radio in AP-only mode can't scan, and the Wi-Fi list
+    // is the whole point of the hotspot. Switching modes after a scan would also restart the hotspot and drop the
+    // phone before the results are sent. The station only connects while g_sta_wanted.
+    const wifi_mode_t mode = ap ? WIFI_MODE_APSTA : WIFI_MODE_STA;
     wifi_mode_t cur = WIFI_MODE_NULL;
     esp_wifi_get_mode(&cur);
     if (g_wifi_started && cur == mode && g_sta_wanted == sta) return;
@@ -467,6 +528,7 @@ esp_err_t start(const std::string& name, std::function<void(const Status&)> on_c
     if (err == ESP_ERR_NOT_SUPPORTED) ESP_LOGI(TAG, "no Ethernet on this chip");
     else if (err != ESP_OK) ESP_LOGE(TAG, "Ethernet failed: %s", esp_err_to_name(err));
     xTaskCreatePinnedToCore(task, "net", 6144, nullptr, 6, &g_task, portNUM_PROCESSORS - 1);
+    xTaskCreate(dns_task, "dns", 3072, nullptr, 3, nullptr);
     return ESP_OK;
 }
 
